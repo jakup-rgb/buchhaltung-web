@@ -1,6 +1,11 @@
 import OpenAI from "openai";
 
-const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+function getClient() {
+  const key = process.env.OPENAI_API_KEY;
+  if (!key) throw new Error("Missing OPENAI_API_KEY");
+  return new OpenAI({ apiKey: key });
+}
+
 
 export type Extracted = {
   vendor: string | null;        // z.B. "BILLA"
@@ -37,6 +42,7 @@ export async function extractFromReceiptImage(params: {
     },
   } as const;
 
+  const client = getClient();
   const resp = await client.chat.completions.create({
     model: "gpt-4o-mini",
     temperature: 0,
