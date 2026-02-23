@@ -101,28 +101,35 @@ export async function POST(req: Request) {
     // 4) Ordnerstruktur
     const rootName = process.env.DRIVE_ROOT_FOLDER || "Belege";
 
-    // Ordner nach HEUTE (später können wir extracted.date verwenden)
-    const now = new Date();
-    const yyyy = String(now.getFullYear());
-    const mm = String(now.getMonth() + 1).padStart(2, "0");
+// ===== Datum vom Beleg verwenden =====
+const receiptDate =
+  extracted.date && /^\d{4}-\d{2}-\d{2}$/.test(extracted.date)
+    ? new Date(extracted.date)
+    : new Date();
 
-    const rootId = await ensureFolder(drive, rootName);
-    const yearId = await ensureFolder(drive, yyyy, rootId);
-    const monthId = await ensureFolder(drive, mm, yearId);
-    const categoryId = await ensureFolder(drive, category, monthId);
+const yyyy = String(receiptDate.getFullYear());
+const mm = String(receiptDate.getMonth() + 1).padStart(2, "0");
+const dd = String(receiptDate.getDate()).padStart(2, "0");
 
-    // 5) Dateiname verbessern
-    const dateStr =
-      extracted.date && /^\d{4}-\d{2}-\d{2}$/.test(extracted.date)
-        ? extracted.date
-        : `${yyyy}-${mm}-${String(now.getDate()).padStart(2, "0")}`;
+// ===== Ordnerstruktur =====
+const rootId = await ensureFolder(drive, rootName);
+const yearId = await ensureFolder(drive, yyyy, rootId);
+const monthId = await ensureFolder(drive, mm, yearId);
+const categoryId = await ensureFolder(drive, category, monthId);
 
-    const vendor = extracted.vendor ? safeForFileName(extracted.vendor) : "BELEG";
-    const totalStr =
-      extracted.total != null ? String(extracted.total).replace(".", ",") : "NA";
+// ===== Dateiname =====
+const dateStr = `${yyyy}-${mm}-${dd}`;
 
-    const fileName = `${dateStr}_${category}_${vendor}_${totalStr}.pdf`;
+const vendor = extracted.vendor
+  ? safeForFileName(extracted.vendor)
+  : "BELEG";
 
+const totalStr =
+  extracted.total != null
+    ? String(extracted.total).replace(".", ",")
+    : "NA";
+
+const fileName = `${dateStr}_${category}_${vendor}_${totalStr}.pdf`;
     // 6) Upload als Stream
     const uploaded = await drive.files.create({
       requestBody: {
