@@ -83,6 +83,16 @@ export async function appendRowToDriveExcel(params: {
     confidence: row.confidence,
   });
 
+  const rowCountAfter = ws.rowCount;
+  const appendedRow = {
+  date: row.date ?? "",
+  vendor: row.vendor ?? "",
+  total: row.total ?? "",
+  currency: row.currency ?? "",
+  category: row.category,
+  pdfName: row.pdfName,
+};
+
   // 3) XLSX wieder speichern -> Buffer
   const out = await wb.xlsx.writeBuffer();
   const outBuffer = Buffer.from(out as ArrayBuffer);
@@ -101,7 +111,7 @@ export async function appendRowToDriveExcel(params: {
       },
       fields: "id, webViewLink",
     });
-    return { id: created.data.id, webViewLink: created.data.webViewLink };
+    return { id: created.data.id, webViewLink: created.data.webViewLink,rowCountAfter, appendedRow, createdNew: true };
   } else {
     const updated = await drive.files.update({
       fileId: existing.id,
@@ -111,6 +121,6 @@ export async function appendRowToDriveExcel(params: {
       },
       fields: "id, webViewLink",
     });
-    return { id: updated.data.id, webViewLink: updated.data.webViewLink };
+    return { id: updated.data.id, webViewLink: updated.data.webViewLink, rowCountAfter, appendedRow, createdNew: false };
   }
 }
