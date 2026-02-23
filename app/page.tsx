@@ -311,7 +311,7 @@ export default function Page() {
 
 const styles: Record<string, React.CSSProperties> = {
   page: {
-    minHeight: "100d  vh",
+    minHeight: "100dvh",
     padding: 18,
     background: "#0b0b0c",
     color: "#f3f3f3",
