@@ -322,7 +322,7 @@ const styles: Record<string, React.CSSProperties> = {
     color: "#f3f3f3",
     display: "flex",
     justifyContent: "center",
-    alignItems: "center",
+    alignItems: "self-start",
   },
   card: {
     width: "100%",
