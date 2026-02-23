@@ -7,7 +7,6 @@ import { Readable } from "stream";
 import { extractFromReceiptImage } from "@/lib/extract";
 import { appendRowToDriveExcel } from "@/lib/driveExcel";
 
-
 async function ensureFolder(drive: any, name: string, parentId?: string) {
   const safeName = name.replace(/'/g, "\\'");
   const qParts = [
@@ -58,6 +57,7 @@ export async function POST(req: Request) {
 
     const form = await req.formData();
     const file = form.get("image") as File | null;
+
     if (!file) {
       return NextResponse.json({ error: "No image uploaded" }, { status: 400 });
     }
@@ -79,7 +79,9 @@ export async function POST(req: Request) {
     // 2) Bild -> PDF
     const pdfDoc = await PDFDocument.create();
     const isPng = mimeType.includes("png");
-    const embedded = isPng ? await pdfDoc.embedPng(bytes) : await pdfDoc.embedJpg(bytes);
+    const embedded = isPng
+      ? await pdfDoc.embedPng(bytes)
+      : await pdfDoc.embedJpg(bytes);
 
     const page = pdfDoc.addPage([embedded.width, embedded.height]);
     page.drawImage(embedded, {
@@ -88,7 +90,6 @@ export async function POST(req: Request) {
       width: embedded.width,
       height: embedded.height,
     });
-    
 
     const pdfBytes = await pdfDoc.save();
 
@@ -136,30 +137,46 @@ export async function POST(req: Request) {
       fields: "id, webViewLink",
     });
 
-    const excel = await appendRowToDriveExcel({
-  drive,
-  rootFolderId: rootId, // <- "Belege" Ordner
-  row: {
-    date: extracted.date,
-    vendor: extracted.vendor,
-    total: extracted.total,
-    currency: extracted.currency,
-    category,
-    pdfName: fileName,
-    pdfWebViewLink: uploaded.data.webViewLink ?? null,
-    pdfFileId: uploaded.data.id ?? null,
-    confidence: extracted.confidence ?? 0,
-  },
-});
-
+    // 7) Excel-Log (nicht den Upload killen, falls Excel mal crasht)
+    let excel: any = null;
+    try {
+      excel = await appendRowToDriveExcel({
+        drive,
+        rootFolderId: rootId, // <- "Belege" Ordner
+        row: {
+          date: extracted?.date ?? new Date().toISOString(),
+          vendor: extracted?.vendor ?? "",
+          total:
+            typeof extracted?.total === "number"
+              ? extracted.total
+              : typeof extracted?.total === "string"
+              ?  Number(String(extracted.total).replace(",", "."))
+              : null,
+          currency: extracted?.currency ?? "",
+          category,
+          pdfName: fileName,
+          pdfWebViewLink: uploaded.data.webViewLink ?? null,
+          pdfFileId: uploaded.data.id ?? null,
+          confidence: extracted?.confidence ?? 0,
+        },
+      });
+    } catch (e: any) {
+      console.error("EXCEL_ERROR", e);
+      excel = {
+        ok: false,
+        error: e?.message ?? String(e),
+      };
+    }
 
     return NextResponse.json({
       ok: true,
-      fileId: uploaded.data.id,
-      webViewLink: uploaded.data.webViewLink,
+      pdf: {
+        fileId: uploaded.data.id,
+        webViewLink: uploaded.data.webViewLink,
+        fileName,
+      },
       folder: { rootName, yyyy, mm, category },
       extracted,
-      fileName,
       excel,
     });
   } catch (e: any) {
