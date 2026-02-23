@@ -23,7 +23,7 @@ export default function Page() {
   const [loadingList, setLoadingList] = useState(false);
 
   const onPick = (f: File | null) => {
-    setResult(null);
+    if (f) setResult(null);
     setFile(f);
     setPreview(f ? URL.createObjectURL(f) : null);
   };
@@ -76,6 +76,7 @@ export default function Page() {
       }
 
       setResult(data);
+      localStorage.setItem("lastResult", JSON.stringify(data));
 
       // Nach erfolgreichem Upload: Liste aktualisieren + Reset
       await loadReceipts();
@@ -84,6 +85,15 @@ export default function Page() {
       setBusy(false);
     }
   };
+
+  useEffect(() => {
+  const saved = localStorage.getItem("lastResult");
+  if (saved) {
+    try {
+      setResult(JSON.parse(saved));
+    } catch {}
+  }
+}, []);
 
   useEffect(() => {
     if (session) loadReceipts();
