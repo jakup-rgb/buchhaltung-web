@@ -134,24 +134,29 @@ export default function Page() {
   }
 
   // ✅ Startscreen (nicht eingeloggt)
-  if (!isLoggedIn) {
-    return (
-      <main style={styles.page}>
-        <div style={styles.card}>
-          <h1 style={styles.title}>Buchhaltung Web</h1>
-          <p style={{ ...styles.muted, marginTop: 6 }}>
-            Belege fotografieren und automatisch in Drive + Excel speichern.
-          </p>
+ if (!isLoggedIn) {
+  return (
+    <main style={styles.page}>
+      <div style={{ width: "100%", maxWidth: 820 }}>
+        {/* Titel oben */}
+        <h1 style={styles.titleTop}>Buchhaltung Web</h1>
+        <p style={styles.subtitleTop}>
+          Belege fotografieren und automatisch in Drive + Excel speichern.
+        </p>
 
-          <div style={{ marginTop: 18 }}>
-            <button style={styles.primaryBtn} onClick={() => signIn("google")}>
-              Login
-            </button>
-          </div>
+        {/* Login Button mittig */}
+        <div style={styles.loginCenter}>
+          <button
+            style={styles.primaryBtnLarge}
+            onClick={() => signIn("google")}
+          >
+            Login
+          </button>
         </div>
-      </main>
-    );
-  }
+      </div>
+    </main>
+  );
+}
 
   // ✅ Eingeloggt
   return (
@@ -474,4 +479,34 @@ const styles: Record<string, React.CSSProperties> = {
     cursor: "pointer",
     fontWeight: 700,
   },
+  titleTop: {
+  margin: 0,
+  fontSize: 36,
+  textAlign: "center",
+},
+
+subtitleTop: {
+  opacity: 0.8,
+  marginTop: 8,
+  textAlign: "center",
+},
+
+loginCenter: {
+  position: "absolute",
+  top: "50%",
+  left: "50%",
+  transform: "translate(-50%, -50%)",
+},
+
+primaryBtnLarge: {
+  background: "#f3f3f3",
+  color: "#0b0b0c",
+  border: "none",
+  borderRadius: 14,
+  padding: "16px 28px",
+  cursor: "pointer",
+  fontWeight: 700,
+  fontSize: 18,
+  boxShadow: "0 8px 30px rgba(0,0,0,0.4)",
+},
 };
