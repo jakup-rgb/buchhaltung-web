@@ -23,7 +23,6 @@ export default function Page() {
   const [loadingList, setLoadingList] = useState(false);
 
   const onPick = (f: File | null) => {
-    if (f) setResult(null);
     setFile(f);
     setPreview(f ? URL.createObjectURL(f) : null);
   };
@@ -80,7 +79,8 @@ export default function Page() {
 
       // Nach erfolgreichem Upload: Liste aktualisieren + Reset
       await loadReceipts();
-      onPick(null);
+      setFile(null);
+      setPreview(null);
     } finally {
       setBusy(false);
     }
