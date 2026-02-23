@@ -28,34 +28,73 @@ async function findFile(drive: any, name: string, parentId?: string) {
   return res.data.files?.[0] ?? null;
 }
 
-// ✅ Findet die letzte "echte" Datenzeile (nicht rowCount, weil der durch Formatierung aufblasen kann)
-function findLastDataRow(ws: ExcelJS.Worksheet) {
-  const max = ws.actualRowCount && ws.actualRowCount > 0 ? ws.actualRowCount : ws.rowCount;
+function ensureHeader(ws: ExcelJS.Worksheet) {
+  // Header in Row 1 setzen (falls leer/kaputt)
+  const r1 = ws.getRow(1);
 
-  for (let r = max; r >= 1; r--) {
-    const row = ws.getRow(r);
+  const headers = [
+    "Datum",
+    "Lieferant",
+    "Betrag",
+    "Währung",
+    "Kategorie",
+    "PDF Name",
+    "Drive Link",
+    "Drive FileId",
+    "Confidence",
+  ];
 
-    // row.values[0] ist immer leer (1-based), daher ab index 1 prüfen
-    const values = Array.isArray(row.values) ? row.values.slice(1) : [];
+  // Wenn Row 1 komplett leer ist oder nur teilweise, setzen wir ihn neu
+  const hasAnyHeader = Array.from({ length: headers.length }).some((_, i) => {
+    const v = r1.getCell(i + 1).value;
+    return v !== null && v !== undefined && String(v).trim() !== "";
+  });
 
-    const hasAnyValue = values.some(
-      (v) =>
-        v !== null &&
-        v !== undefined &&
-        (typeof v === "number" ? true : String(v).trim() !== "")
-    );
-
-    // Zeile 1 ist Header – zählen wir als "Daten vorhanden"
-    if (hasAnyValue) return r;
+  if (!hasAnyHeader) {
+    headers.forEach((h, i) => {
+      r1.getCell(i + 1).value = h;
+    });
+    r1.font = { bold: true };
+    r1.commit?.();
   }
 
-  return 1;
+  // Optional: Spaltenbreiten (Google/Excel ignoriert das manchmal)
+  const widths = [12, 24, 10, 8, 14, 40, 50, 24, 10];
+  widths.forEach((w, i) => {
+    ws.getColumn(i + 1).width = w;
+  });
 }
 
-// ✅ Stelle sicher, dass Betrag immer number|null ist
+function findLastDataRow(ws: ExcelJS.Worksheet) {
+  // Wir suchen die letzte Zeile, die in A..I irgendeinen Wert hat
+  const max = Math.max(ws.actualRowCount || 0, ws.rowCount || 0, 1);
+
+  for (let r = max; r >= 2; r--) {
+    const row = ws.getRow(r);
+    let has = false;
+    for (let c = 1; c <= 9; c++) {
+      const v = row.getCell(c).value;
+      if (v !== null && v !== undefined && String(v).trim() !== "") {
+        has = true;
+        break;
+      }
+    }
+    if (has) return r;
+  }
+
+  return 1; // nur Header
+}
+
 function normalizeTotal(total: RowData["total"]) {
-  if (typeof total === "number") return Number.isFinite(total) ? total : null;
+  if (typeof total === "number" && Number.isFinite(total)) return total;
   return null;
+}
+
+function normalizeDate(d: RowData["date"]) {
+  // falls "null" als String reinkommt
+  if (!d) return "";
+  if (d === "null") return "";
+  return d;
 }
 
 export async function appendRowToDriveExcel(params: {
@@ -74,7 +113,6 @@ export async function appendRowToDriveExcel(params: {
   let ws: ExcelJS.Worksheet;
 
   if (existing) {
-    // Download existing xlsx
     const dl = await drive.files.get(
       { fileId: existing.id, alt: "media" },
       { responseType: "arraybuffer" }
@@ -84,86 +122,62 @@ export async function appendRowToDriveExcel(params: {
     const buf = Buffer.from(arr);
     await wb.xlsx.load(buf as any);
 
-    ws =
-      wb.getWorksheet("Belege") ??
-      wb.worksheets[0] ??
-      wb.addWorksheet("Belege");
-
-    // Falls jemand die Spalten/Headers gelöscht hat: sicherstellen
-    if (!ws.columns || ws.columns.length === 0) {
-      ws.columns = [
-        { header: "Datum", key: "date", width: 12 },
-        { header: "Lieferant", key: "vendor", width: 24 },
-        { header: "Betrag", key: "total", width: 10 },
-        { header: "Währung", key: "currency", width: 8 },
-        { header: "Kategorie", key: "category", width: 14 },
-        { header: "PDF Name", key: "pdfName", width: 40 },
-        { header: "Drive Link", key: "pdfWebViewLink", width: 50 },
-        { header: "Drive FileId", key: "pdfFileId", width: 24 },
-        { header: "Confidence", key: "confidence", width: 10 },
-      ];
-      ws.getRow(1).font = { bold: true };
-    }
+    ws = wb.getWorksheet("Belege") ?? wb.worksheets[0] ?? wb.addWorksheet("Belege");
   } else {
     ws = wb.addWorksheet("Belege");
-    ws.columns = [
-      { header: "Datum", key: "date", width: 12 },
-      { header: "Lieferant", key: "vendor", width: 24 },
-      { header: "Betrag", key: "total", width: 10 },
-      { header: "Währung", key: "currency", width: 8 },
-      { header: "Kategorie", key: "category", width: 14 },
-      { header: "PDF Name", key: "pdfName", width: 40 },
-      { header: "Drive Link", key: "pdfWebViewLink", width: 50 },
-      { header: "Drive FileId", key: "pdfFileId", width: 24 },
-      { header: "Confidence", key: "confidence", width: 10 },
-    ];
-    ws.getRow(1).font = { bold: true };
   }
 
-  // 2) ✅ Neue Zeile immer direkt unter letzte "echte" Datenzeile setzen
-  const lastDataRow = findLastDataRow(ws);
-  const targetRowIndex = Math.max(2, lastDataRow + 1); // mindestens 2 (unter Header)
+  // 2) Header sicherstellen
+  ensureHeader(ws);
 
-  // Werte vorbereiten
-  const rowValues = {
-    date: row.date ?? "",
+  // 3) Zielzeile finden und ZELLEN direkt setzen (wichtig!)
+  const lastDataRow = findLastDataRow(ws);
+  const targetRowIndex = lastDataRow + 1;
+
+  const r = ws.getRow(targetRowIndex);
+
+  r.getCell(1).value = normalizeDate(row.date);
+  r.getCell(2).value = row.vendor ?? "";
+  r.getCell(3).value = normalizeTotal(row.total); // number|null
+  r.getCell(4).value = row.currency ?? "";
+  r.getCell(5).value = row.category ?? "";
+  r.getCell(6).value = row.pdfName ?? "";
+  r.getCell(7).value = row.pdfWebViewLink ?? "";
+  r.getCell(8).value = row.pdfFileId ?? "";
+  r.getCell(9).value = typeof row.confidence === "number" ? row.confidence : 0;
+
+  r.commit?.();
+
+  const rowCountAfter = Math.max(ws.actualRowCount || 0, ws.rowCount || 0);
+
+  const appendedRow = {
+    date: normalizeDate(row.date),
     vendor: row.vendor ?? "",
-    total: normalizeTotal(row.total), // ✅ number|null
+    total: normalizeTotal(row.total),
     currency: row.currency ?? "",
     category: row.category,
     pdfName: row.pdfName,
     pdfWebViewLink: row.pdfWebViewLink ?? "",
     pdfFileId: row.pdfFileId ?? "",
     confidence: typeof row.confidence === "number" ? row.confidence : 0,
-  };
-
-  // insertRow ist stabiler als addRow bei "Ghost" rowCounts
-  ws.insertRow(targetRowIndex, rowValues);
-
-  // Debug/Return
-  const rowCountAfter = ws.actualRowCount || ws.rowCount;
-  const appendedRow = {
-    ...rowValues,
     targetRowIndex,
     lastDataRow,
   };
 
-  // 3) XLSX wieder speichern -> Buffer
+  // 4) XLSX speichern -> Buffer
   const out = await wb.xlsx.writeBuffer();
   const outBuffer = Buffer.from(out as ArrayBuffer);
 
-  // 4) Upload: create oder update
+  // 5) Upload: create oder update
   if (!existing) {
     const created = await drive.files.create({
       requestBody: {
         name: excelName,
         parents: [rootFolderId],
-        mimeType:
-          "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        mimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
       },
       media: {
-        mimeType:
-          "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        mimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         body: Readable.from(outBuffer),
       },
       fields: "id, webViewLink",
@@ -180,14 +194,12 @@ export async function appendRowToDriveExcel(params: {
     const updated = await drive.files.update({
       fileId: existing.id,
       media: {
-        mimeType:
-          "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        mimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         body: Readable.from(outBuffer),
       },
       fields: "id, webViewLink",
     });
 
-    // updated.data.id kann leer sein, daher existing.id verwenden
     return {
       id: existing.id,
       webViewLink: updated.data.webViewLink,
