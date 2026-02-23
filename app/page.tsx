@@ -311,13 +311,13 @@ export default function Page() {
 
 const styles: Record<string, React.CSSProperties> = {
   page: {
-    minHeight: "100vh",
+    minHeight: "100d  vh",
     padding: 18,
     background: "#0b0b0c",
     color: "#f3f3f3",
     display: "flex",
     justifyContent: "center",
-    alignItems: "flex-start",
+    alignItems: "center",
   },
   card: {
     width: "100%",
