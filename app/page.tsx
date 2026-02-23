@@ -166,7 +166,7 @@ export default function Page() {
         <div style={styles.headerRow}>
           <div>
             <h1 style={styles.title}>Buchhaltung Web</h1>
-            <div style={styles.mutedSmall}>Angemeldet als {session.user?.email}</div>
+            <div style={styles.mutedSmall}>Angemeldet {session.user?.email}</div>
           </div>
 
           {/* Menü oben rechts */}
@@ -322,7 +322,7 @@ const styles: Record<string, React.CSSProperties> = {
     color: "#f3f3f3",
     display: "flex",
     justifyContent: "center",
-    alignItems: "self-start",
+    alignItems: "center",
   },
   card: {
     width: "100%",
