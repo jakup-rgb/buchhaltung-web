@@ -3,6 +3,12 @@ import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
 import Providers from "./providers"; // 👈 hinzufügen
 
+<script
+  async
+  src="https://docs.opencv.org/4.x/opencv.js"
+  type="text/javascript"
+/>
+
 const geistSans = Geist({
   variable: "--font-geist-sans",
   subsets: ["latin"],

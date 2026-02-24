@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { signIn, signOut, useSession } from "next-auth/react";
+import { scanDocumentFromImage } from "@/lib/scanDocument";
 
 type ReceiptItem = {
   id: string;
@@ -90,6 +91,9 @@ export default function Page() {
     setBusy(true);
     try {
       const fd = new FormData();
+      const scannedBlob = await scanDocumentFromImage(file);
+
+      const scannFile = new File([scannedBlob], file.name, { type: "image/jpeg" });
       fd.append("image", file);
 
       const res = await fetch("/api/upload", { method: "POST", body: fd });
