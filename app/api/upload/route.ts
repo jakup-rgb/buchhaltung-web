@@ -74,7 +74,23 @@ export async function POST(req: Request) {
       base64: bytes.toString("base64"),
     });
 
-    const category = extracted.category ?? "SONSTIGES";
+    const overridesRaw = form.get("overrides") as string | null;
+let overrides: any = null;
+
+if (overridesRaw) {
+  try {
+    overrides = JSON.parse(overridesRaw);
+  } catch {}
+}
+
+const final = {
+  ...extracted,
+  ...(overrides ?? {}),
+};
+
+// ab jetzt überall `final` verwenden statt `extracted`
+
+    const category = final.category ?? "SONSTIGES";
 
     // 2) Bild -> PDF
     const pdfDoc = await PDFDocument.create();
@@ -103,8 +119,8 @@ export async function POST(req: Request) {
 
 // ===== Datum vom Beleg verwenden =====
 const receiptDate =
-  extracted.date && /^\d{4}-\d{2}-\d{2}$/.test(extracted.date)
-    ? new Date(extracted.date)
+  final.date && /^\d{4}-\d{2}-\d{2}$/.test(final.date)
+    ? new Date(final.date)
     : new Date();
 
 const yyyy = String(receiptDate.getFullYear());
@@ -120,13 +136,13 @@ const categoryId = await ensureFolder(drive, category, monthId);
 // ===== Dateiname =====
 const dateStr = `${yyyy}-${mm}-${dd}`;
 
-const vendor = extracted.vendor
-  ? safeForFileName(extracted.vendor)
+const vendor = final.vendor
+  ? safeForFileName(final.vendor)
   : "BELEG";
 
 const totalStr =
-  extracted.total != null
-    ? String(extracted.total).replace(".", ",")
+  final.total != null
+    ? String(final.total).replace(".", ",")
     : "NA";
 
 const fileName = `${dateStr}_${category}_${vendor}_${totalStr}.pdf`;
@@ -144,36 +160,32 @@ const fileName = `${dateStr}_${category}_${vendor}_${totalStr}.pdf`;
       fields: "id, webViewLink",
     });
 
-    // 7) Excel-Log (nicht den Upload killen, falls Excel mal crasht)
-    let excel: any = null;
-    try {
-      excel = await appendRowToDriveExcel({
-        drive,
-        rootFolderId: rootId, // <- "Belege" Ordner
-        row: {
-          date: extracted?.date ?? new Date().toISOString(),
-          vendor: extracted?.vendor ?? "",
-          total:
-            typeof extracted?.total === "number"
-              ? extracted.total
-              : typeof extracted?.total === "string"
-              ?  Number(String(extracted.total).replace(",", "."))
-              : null,
-          currency: extracted?.currency ?? "",
-          category,
-          pdfName: fileName,
-          pdfWebViewLink: uploaded.data.webViewLink ?? null,
-          pdfFileId: uploaded.data.id ?? null,
-          confidence: extracted?.confidence ?? 0,
-        },
-      });
-    } catch (e: any) {
-      console.error("EXCEL_ERROR", e);
-      excel = {
-        ok: false,
-        error: e?.message ?? String(e),
-      };
-    }
+let excel: any = null;
+try {
+  excel = await appendRowToDriveExcel({
+    drive,
+    rootFolderId: rootId,
+    row: {
+      date: final?.date ?? new Date().toISOString().slice(0, 10), // ✅ nur YYYY-MM-DD
+      vendor: final?.vendor ?? "",
+      total:
+        typeof final?.total === "number"
+          ? final.total
+          : typeof final?.total === "string"
+          ? Number(String(final.total).replace(",", "."))
+          : null,
+      currency: final?.currency ?? "EUR", // ✅ Default
+      category,
+      pdfName: fileName,
+      pdfWebViewLink: uploaded.data.webViewLink ?? null,
+      pdfFileId: uploaded.data.id ?? null,
+      confidence: typeof final?.confidence === "number" ? final.confidence : 0, // ✅ sauber
+    },
+  });
+} catch (e: any) {
+  console.error("EXCEL_ERROR", e);
+  excel = { ok: false, error: e?.message ?? String(e) };
+}
 
     return NextResponse.json({
       ok: true,
