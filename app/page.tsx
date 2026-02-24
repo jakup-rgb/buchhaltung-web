@@ -10,6 +10,10 @@ type ReceiptItem = {
   createdTime?: string | null;
 };
 
+const HISTORY_KEY = "historyClearedAt";
+const LAST_RESULT_KEY = "lastResult";
+const MAX_VISIBLE_RECEIPTS = 50; // optional: verhindert endlos lange Liste
+
 export default function Page() {
   const { data: session, status } = useSession();
 
@@ -25,12 +29,32 @@ export default function Page() {
   const [menuOpen, setMenuOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement | null>(null);
 
+  const [historyClearedAt, setHistoryClearedAt] = useState<number>(0);
+
   const isLoggedIn = !!session;
 
   const onPick = (f: File | null) => {
     if (f) setResult(null);
     setFile(f);
     setPreview(f ? URL.createObjectURL(f) : null);
+  };
+
+  const clearHistoryView = () => {
+    const ts = Date.now();
+    setHistoryClearedAt(ts);
+    localStorage.setItem(HISTORY_KEY, String(ts));
+    setItems([]); // UI sofort leeren
+  };
+
+  const applyHistoryFilter = (all: ReceiptItem[], clearedAt: number) => {
+    const filtered = all.filter((it) => {
+      if (!clearedAt) return true;
+      if (!it.createdTime) return true;
+      return new Date(it.createdTime).getTime() > clearedAt;
+    });
+
+    // Optional: immer nur die letzten X anzeigen
+    return filtered.slice(0, MAX_VISIBLE_RECEIPTS);
   };
 
   const loadReceipts = async () => {
@@ -53,7 +77,8 @@ export default function Page() {
         return;
       }
 
-      setItems((data.items ?? []) as ReceiptItem[]);
+      const all = (data.items ?? []) as ReceiptItem[];
+      setItems(applyHistoryFilter(all, historyClearedAt));
     } finally {
       setLoadingList(false);
     }
@@ -83,7 +108,7 @@ export default function Page() {
       }
 
       setResult(data);
-      localStorage.setItem("lastResult", JSON.stringify(data));
+      localStorage.setItem(LAST_RESULT_KEY, JSON.stringify(data));
 
       // Liste aktualisieren + Reset
       await loadReceipts();
@@ -93,13 +118,19 @@ export default function Page() {
     }
   };
 
-  // lastResult wiederherstellen (damit’s nicht “weg” ist)
+  // lastResult + historyClearedAt wiederherstellen (damit’s nicht “weg” ist)
   useEffect(() => {
-    const saved = localStorage.getItem("lastResult");
+    const saved = localStorage.getItem(LAST_RESULT_KEY);
     if (saved) {
       try {
         setResult(JSON.parse(saved));
       } catch {}
+    }
+
+    const cleared = localStorage.getItem(HISTORY_KEY);
+    if (cleared) {
+      const n = Number(cleared);
+      if (!Number.isNaN(n)) setHistoryClearedAt(n);
     }
   }, []);
 
@@ -108,6 +139,12 @@ export default function Page() {
     if (session) loadReceipts();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session]);
+
+  // Wenn historyClearedAt geändert wird: Liste neu filtern (falls Items schon da sind)
+  useEffect(() => {
+    setItems((prev) => applyHistoryFilter(prev, historyClearedAt));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [historyClearedAt]);
 
   // Menü schließen bei Klick außerhalb
   useEffect(() => {
@@ -134,29 +171,26 @@ export default function Page() {
   }
 
   // ✅ Startscreen (nicht eingeloggt)
- if (!isLoggedIn) {
-  return (
-    <main style={styles.page}>
-      <div style={{ width: "100%", maxWidth: 820 }}>
-        {/* Titel oben */}
-        <h1 style={styles.titleTop}>Buchhaltung Web</h1>
-        <p style={styles.subtitleTop}>
-          Belege fotografieren und automatisch in Drive + Excel speichern.
-        </p>
+  if (!isLoggedIn) {
+    return (
+      <main style={styles.page}>
+        <div style={{ width: "100%", maxWidth: 820 }}>
+          {/* Titel oben */}
+          <h1 style={styles.titleTop}>Buchhaltung Web</h1>
+          <p style={styles.subtitleTop}>
+            Belege fotografieren und automatisch in Drive + Excel speichern.
+          </p>
 
-        {/* Login Button mittig */}
-        <div style={styles.loginCenter}>
-          <button
-            style={styles.primaryBtnLarge}
-            onClick={() => signIn("google")}
-          >
-            Login
-          </button>
+          {/* Login Button mittig */}
+          <div style={styles.loginCenter}>
+            <button style={styles.primaryBtnLarge} onClick={() => signIn("google")}>
+              Login
+            </button>
+          </div>
         </div>
-      </div>
-    </main>
-  );
-}
+      </main>
+    );
+  }
 
   // ✅ Eingeloggt
   return (
@@ -240,15 +274,11 @@ export default function Page() {
 
           {preview && (
             <div style={{ marginTop: 12 }}>
-              <img
-                src={preview}
-                alt="preview"
-                style={styles.previewImg}
-              />
+              <img src={preview} alt="preview" style={styles.previewImg} />
             </div>
           )}
 
-          {/* Debug / Ergebnis (nicht mehr so riesig, aber verfügbar) */}
+          {/* Debug / Ergebnis */}
           {result && (
             <details style={{ marginTop: 12 }}>
               <summary style={styles.detailsSummary}>Letztes Ergebnis anzeigen</summary>
@@ -273,8 +303,12 @@ export default function Page() {
                 {loadingList ? "Laden…" : "Aktualisieren"}
               </button>
 
-              {/* “Verlauf löschen” machen wir später (API + Drive Delete) */}
-              <button style={{ ...styles.secondaryBtn, opacity: 0.5 }} disabled title="Kommt später">
+              <button
+                style={{ ...styles.secondaryBtn, opacity: loadingList ? 0.6 : 1 }}
+                onClick={clearHistoryView}
+                disabled={loadingList}
+                title="Löscht nur die Anzeige (nicht Drive/Excel)"
+              >
                 Verlauf löschen
               </button>
             </div>
@@ -480,33 +514,30 @@ const styles: Record<string, React.CSSProperties> = {
     fontWeight: 700,
   },
   titleTop: {
-  margin: 0,
-  fontSize: 36,
-  textAlign: "center",
-},
-
-subtitleTop: {
-  opacity: 0.8,
-  marginTop: 8,
-  textAlign: "center",
-},
-
-loginCenter: {
-  position: "absolute",
-  top: "50%",
-  left: "50%",
-  transform: "translate(-50%, -50%)",
-},
-
-primaryBtnLarge: {
-  background: "#f3f3f3",
-  color: "#0b0b0c",
-  border: "none",
-  borderRadius: 14,
-  padding: "16px 28px",
-  cursor: "pointer",
-  fontWeight: 700,
-  fontSize: 18,
-  boxShadow: "0 8px 30px rgba(0,0,0,0.4)",
-},
+    margin: 0,
+    fontSize: 36,
+    textAlign: "center",
+  },
+  subtitleTop: {
+    opacity: 0.8,
+    marginTop: 8,
+    textAlign: "center",
+  },
+  loginCenter: {
+    position: "absolute",
+    top: "50%",
+    left: "50%",
+    transform: "translate(-50%, -50%)",
+  },
+  primaryBtnLarge: {
+    background: "#f3f3f3",
+    color: "#0b0b0c",
+    border: "none",
+    borderRadius: 14,
+    padding: "16px 28px",
+    cursor: "pointer",
+    fontWeight: 700,
+    fontSize: 18,
+    boxShadow: "0 8px 30px rgba(0,0,0,0.4)",
+  },
 };
