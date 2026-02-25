@@ -455,11 +455,11 @@ const openReviewForFile = async (f: File) => {
             <div style={styles.modalBody}>
               {/* Image */}
               <div style={styles.modalImageWrap}>
-                {scannedPreviewUrl ? (
-                  <img src={scannedPreviewUrl} alt="scan preview" style={styles.modalImg} />
-                ) : previewUrl ? (
+                {previewUrl ? (
                   <img src={previewUrl} alt="preview" style={styles.modalImg} />
-                ) : null}
+                ) : (
+                  <div style={{ padding: 12, opacity: 0.6 }}>Kein  Bild verfügbar</div>
+                )}
               </div>
 
               {/* Form */}
