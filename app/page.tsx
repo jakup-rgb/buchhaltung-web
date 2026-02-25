@@ -122,6 +122,7 @@ const openReviewForFile = async (f: File) => {
 
   const url = URL.createObjectURL(f);
   setPreviewUrl(url);
+  console.log("PREVIEW URL:", url, "file:", f?.name, f?.type, f?.size);
   setScannedPreviewUrl(url); // Modal zeigt dieses Bild
 
   // Extract auf ORIGINAL
@@ -453,6 +454,7 @@ const openReviewForFile = async (f: File) => {
             </div>
 
             <div style={styles.modalBody}>
+              <div style={{ fontSize: 12, opacity: 0.7 }}>previewUrl: {String(previewUrl)}</div>
               {/* Image */}
               <div style={styles.modalImageWrap}>
                 {previewUrl ? (
