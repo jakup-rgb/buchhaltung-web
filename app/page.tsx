@@ -714,9 +714,10 @@ const styles: Record<string, React.CSSProperties> = {
     background: "rgba(0,0,0,0.65)",
     display: "flex",
     justifyContent: "center",
-    alignItems: "center",
+    alignItems: "flex-start",
     padding: 16,
     zIndex: 50,
+    overflowY: "auto",
   },
   modalCard: {
     width: "100%",
