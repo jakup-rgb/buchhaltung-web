@@ -111,70 +111,74 @@ export default function Page() {
   };
 
   // -------------- Review Open (nach Auswahl) --------------
-  const openReviewForFile = async (f: File) => {
-    // 1) Preview setzen (raw)
-    const rawUrl = URL.createObjectURL(f);
-    setPreviewUrl(rawUrl);
-    setRawFile(f);
+const openReviewForFile = async (f: File) => {
+  // Alte URLs sauber freigeben
+  if (previewUrl) URL.revokeObjectURL(previewUrl);
+  if (scannedPreviewUrl) URL.revokeObjectURL(scannedPreviewUrl);
 
-    // 2) Scannen/Croppen (OpenCV)
-    let scanned: File | null = null;
-    try {
-      const scannedBlob = await scanDocumentFromImage(f);
-      scanned = new File([scannedBlob], f.name.replace(/\.\w+$/, "") + "_scan.jpg", {
-        type: "image/jpeg",
-      });
-      setScannedFile(scanned);
+  // Raw
+  const rawUrl = URL.createObjectURL(f);
+  setPreviewUrl(rawUrl);
+  setRawFile(f);
 
-      const scanUrl = URL.createObjectURL(scanned);
-      setScannedPreviewUrl(scanUrl);
-    } catch (e) {
-      // falls Scan fehlschlägt: nimm original
-      setScannedFile(f);
-      setScannedPreviewUrl(rawUrl);
+  // Scan / Crop
+  let finalScanFile: File = f;
+  try {
+    const scannedBlob = await scanDocumentFromImage(f);
+
+    // wichtig: wenn blob zu klein -> als fehler behandeln
+    if (!scannedBlob || scannedBlob.size < 5000) {
+      throw new Error("Scan result too small");
     }
 
-    // 3) Jetzt: Extraktion machen (ohne Upload)
-    // Dafür brauchst du idealerweise /api/extract
-    // Falls du das (noch) nicht hast: wir öffnen Modal trotzdem,
-    // und du kannst manuell tippen. Wenn /api/extract existiert, füllen wir automatisch.
-    try {
-      const fd = new FormData();
-      fd.append("image", scanned ?? f);
+    finalScanFile = new File(
+      [scannedBlob],
+      f.name.replace(/\.\w+$/, "") + "_scan.jpg",
+      { type: "image/jpeg" }
+    );
+  } catch {
+    finalScanFile = f;
+  }
 
-      const res = await fetch("/api/extract", { method: "POST", body: fd });
-      if (res.ok) {
-        const data = await res.json();
-        // erwartet: { extracted: {...} }
-        const ex = data?.extracted ?? data ?? {};
+  setScannedFile(finalScanFile);
+  const scanUrl = URL.createObjectURL(finalScanFile);
+  setScannedPreviewUrl(scanUrl);
 
-        setReviewForm((prev) => ({
-          ...prev,
-          date: ex.date ?? prev.date ?? "",
-          time: ex.time ?? "",
-          vendor: ex.vendor ?? "",
-          total:
-            typeof ex.total === "number"
-              ? String(ex.total)
-              : typeof ex.total === "string"
-              ? ex.total
-              : "",
-          currency: ex.currency ?? "EUR",
-          category: (ex.category as Category) ?? "SONSTIGES",
-          invoiceNumber: ex.invoiceNumber ?? "",
-          companyType: ex.companyType === "INTERN" ? "INTERN" : "EXTERN",
-          internalCompany: ex.internalCompany ?? "",
-          confidence: typeof ex.confidence === "number" ? ex.confidence : 0,
-        }));
-      } else {
-        // kein extract endpoint oder error -> einfach leer lassen
-      }
-    } catch {
-      // ignore
+  // Extract (immer auf finalScanFile)
+  try {
+    const fd = new FormData();
+    fd.append("image", finalScanFile);
+
+    const res = await fetch("/api/extract", { method: "POST", body: fd });
+    if (res.ok) {
+      const data = await res.json();
+      const ex = data?.extracted ?? data ?? {};
+
+      setReviewForm((prev) => ({
+        ...prev,
+        date: ex.date ?? prev.date ?? "",
+        time: ex.time ?? "",
+        vendor: ex.vendor ?? "",
+        total:
+          typeof ex.total === "number"
+            ? String(ex.total)
+            : typeof ex.total === "string"
+            ? ex.total
+            : "",
+        currency: ex.currency ?? "EUR",
+        category: (ex.category as Category) ?? "SONSTIGES",
+        invoiceNumber: ex.invoiceNumber ?? "",
+        companyType: ex.companyType === "INTERN" ? "INTERN" : "EXTERN",
+        internalCompany: ex.internalCompany ?? "",
+        confidence: typeof ex.confidence === "number" ? ex.confidence : 0,
+      }));
     }
+  } catch {
+    // ignore
+  }
 
-    setReviewOpen(true);
-  };
+  setReviewOpen(true);
+};
 
   // -------------- onPick --------------
   const onPick = async (f: File | null) => {
