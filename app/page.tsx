@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { signIn, signOut, useSession } from "next-auth/react";
-import { scanDocumentFromImage } from "@/lib/scanDocument";
+// import { scanDocumentFromImage } from "@/lib/scanDocument";
 
 type ReceiptItem = {
   id: string;
@@ -112,59 +112,40 @@ export default function Page() {
 
   // -------------- Review Open (nach Auswahl) --------------
 const openReviewForFile = async (f: File) => {
-  // Alte URLs sauber freigeben
+  // Alte URLs freigeben (optional aber gut)
   if (previewUrl) URL.revokeObjectURL(previewUrl);
   if (scannedPreviewUrl) URL.revokeObjectURL(scannedPreviewUrl);
 
-  // Raw
-  const rawUrl = URL.createObjectURL(f);
-  setPreviewUrl(rawUrl);
+  // Wir verwenden nur das Original
   setRawFile(f);
+  setScannedFile(f);
 
-  // Scan / Crop
-  let finalScanFile: File = f;
-  try {
-    const scannedBlob = await scanDocumentFromImage(f);
+  const url = URL.createObjectURL(f);
+  setPreviewUrl(url);
+  setScannedPreviewUrl(url); // Modal zeigt dieses Bild
 
-    // wichtig: wenn blob zu klein -> als fehler behandeln
-    if (!scannedBlob || scannedBlob.size < 5000) {
-      throw new Error("Scan result too small");
-    }
-
-    finalScanFile = new File(
-      [scannedBlob],
-      f.name.replace(/\.\w+$/, "") + "_scan.jpg",
-      { type: "image/jpeg" }
-    );
-  } catch {
-    finalScanFile = f;
-  }
-
-  setScannedFile(finalScanFile);
-  const scanUrl = URL.createObjectURL(finalScanFile);
-  setScannedPreviewUrl(scanUrl);
-
-  // Extract (immer auf finalScanFile)
+  // Extract auf ORIGINAL
   try {
     const fd = new FormData();
-    fd.append("image", finalScanFile);
+    fd.append("image", f);
 
     const res = await fetch("/api/extract", { method: "POST", body: fd });
-    if (res.ok) {
-      const data = await res.json();
-      const ex = data?.extracted ?? data ?? {};
+    const text = await res.text();
 
+    let data: any;
+    try { data = JSON.parse(text); } catch { data = { raw: text }; }
+
+    if (res.ok) {
+      const ex = data?.extracted ?? data ?? {};
       setReviewForm((prev) => ({
         ...prev,
-        date: ex.date ?? prev.date ?? "",
+        date: ex.date ?? "",
         time: ex.time ?? "",
         vendor: ex.vendor ?? "",
         total:
-          typeof ex.total === "number"
-            ? String(ex.total)
-            : typeof ex.total === "string"
-            ? ex.total
-            : "",
+          typeof ex.total === "number" ? String(ex.total)
+          : typeof ex.total === "string" ? ex.total
+          : "",
         currency: ex.currency ?? "EUR",
         category: (ex.category as Category) ?? "SONSTIGES",
         invoiceNumber: ex.invoiceNumber ?? "",
@@ -172,9 +153,11 @@ const openReviewForFile = async (f: File) => {
         internalCompany: ex.internalCompany ?? "",
         confidence: typeof ex.confidence === "number" ? ex.confidence : 0,
       }));
+    } else {
+      setResult({ error: true, where: "/api/extract", status: res.status, data });
     }
-  } catch {
-    // ignore
+  } catch (e: any) {
+    setResult({ error: true, where: "/api/extract", message: e?.message ?? String(e) });
   }
 
   setReviewOpen(true);
