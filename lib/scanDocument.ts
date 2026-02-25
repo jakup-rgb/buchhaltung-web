@@ -1,7 +1,9 @@
 /* lib/scanDocument.ts
-   OpenCV “Scanner”:
+   OpenCV “Scanner” (robuster):
    - wartet bis cv geladen ist
-   - findet größtes 4-Eck (Beleg)
+   - downscale für Stabilität/Speed
+   - edges + morph close
+   - findet bestes 4-Eck (Area + rectangularity)
    - sortiert Punkte korrekt (TL, TR, BR, BL)
    - Perspective Warp auf echte Zielgröße
    - Fallback: wenn kein Beleg gefunden → Originalbild als JPEG zurück
@@ -14,7 +16,6 @@ function waitForOpenCV(timeoutMs = 8000): Promise<void> {
     const start = Date.now();
     const tick = () => {
       try {
-        // cv ist global von opencv.js
         if (typeof cv !== "undefined" && cv && cv.imread) return resolve();
       } catch {}
       if (Date.now() - start > timeoutMs) {
@@ -62,90 +63,143 @@ async function fileToJpegBlob(file: File, quality = 0.95): Promise<Blob> {
   });
 }
 
+/** Score: wie “rechteckig” ist das 4-Eck im Vergleich zur BoundingRect? 0..1 */
+function rectangularityScore(quad: any) {
+  // quad: approx Mat (4 Punkte)
+  const cnt = quad;
+  const area = cv.contourArea(cnt);
+  const rect = cv.boundingRect(cnt);
+  const rectArea = rect.width * rect.height;
+  if (!rectArea) return 0;
+  return area / rectArea;
+}
+
 export async function scanDocumentFromImage(imageFile: File): Promise<Blob> {
-  // ✅ sicherstellen dass OpenCV bereit ist
   try {
     await waitForOpenCV();
   } catch {
-    // Fallback: OpenCV nicht da → einfach als JPEG zurück
     return fileToJpegBlob(imageFile);
   }
 
   const imageBitmap = await createImageBitmap(imageFile);
 
-  // Arbeitscanvas
+  // Canvas from input
   const canvas = document.createElement("canvas");
   canvas.width = imageBitmap.width;
   canvas.height = imageBitmap.height;
   const ctx = canvas.getContext("2d")!;
   ctx.drawImage(imageBitmap, 0, 0);
 
-  // OpenCV Mats
-  const src = cv.imread(canvas);
+  // Read to Mat
+  const srcFull = cv.imread(canvas);
+
+  // --- Downscale (stabiler + schneller) ---
+  const maxDim = 1200; // gute Balance
+  const scale = Math.min(1, maxDim / Math.max(srcFull.cols, srcFull.rows));
+  const src = new cv.Mat();
+  if (scale < 1) {
+    const dsize = new cv.Size(Math.round(srcFull.cols * scale), Math.round(srcFull.rows * scale));
+    cv.resize(srcFull, src, dsize, 0, 0, cv.INTER_AREA);
+  } else {
+    srcFull.copyTo(src);
+  }
+
   const gray = new cv.Mat();
   const blurred = new cv.Mat();
   const edged = new cv.Mat();
+  const closed = new cv.Mat();
+
   const contours = new cv.MatVector();
   const hierarchy = new cv.Mat();
 
-  // Preprocess
+  // Preprocess: gray
   cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
 
-  // etwas stärkerer blur für stabilere edges
-  cv.GaussianBlur(gray, blurred, new cv.Size(5, 5), 0);
+  // Blur: bilateral ist bei Papier oft besser als Gaussian (Kanten bleiben schärfer)
+  // fallback: Gaussian
+  try {
+    cv.bilateralFilter(gray, blurred, 9, 75, 75);
+  } catch {
+    cv.GaussianBlur(gray, blurred, new cv.Size(5, 5), 0);
+  }
 
-  // Edges
-  cv.Canny(blurred, edged, 75, 200);
+  // Canny edges
+  cv.Canny(blurred, edged, 50, 150);
 
-  // Konturen finden
-  cv.findContours(edged, contours, hierarchy, cv.RETR_LIST, cv.CHAIN_APPROX_SIMPLE);
+  // Morph close: Kanten “schließen” (wichtig bei Kassenzettel, wo Kanten unterbrochen sind)
+  const kernel = cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(5, 5));
+  cv.morphologyEx(edged, closed, cv.MORPH_CLOSE, kernel);
+
+  // Contours
+  cv.findContours(closed, contours, hierarchy, cv.RETR_LIST, cv.CHAIN_APPROX_SIMPLE);
 
   let bestApprox: any = null;
-  let maxArea = 0;
+  let bestScore = 0;
 
-  // größtes 4-eck suchen
+  const imgArea = src.cols * src.rows;
+
   for (let i = 0; i < contours.size(); i++) {
     const contour = contours.get(i);
     const area = cv.contourArea(contour);
-    if (area < 1000) continue; // zu klein ignorieren
+
+    // zu klein weg
+    if (area < imgArea * 0.05) continue; // <5% der Fläche ignorieren
 
     const peri = cv.arcLength(contour, true);
     const approx = new cv.Mat();
     cv.approxPolyDP(contour, approx, 0.02 * peri, true);
 
-    if (approx.rows === 4 && area > maxArea) {
-      if (bestApprox) bestApprox.delete?.();
-      bestApprox = approx;
-      maxArea = area;
+    if (approx.rows === 4) {
+      // Score: große Fläche + rechteckig
+      const rectScore = rectangularityScore(approx); // 0..1
+      const areaScore = area / imgArea;               // 0..1
+
+      const score = areaScore * 0.8 + rectScore * 0.2;
+
+      // Extra: sehr “schlanke” Rechtecke können falsch sein → rectScore hilft
+      if (score > bestScore) {
+        if (bestApprox) bestApprox.delete?.();
+        bestApprox = approx;
+        bestScore = score;
+      } else {
+        approx.delete?.();
+      }
     } else {
       approx.delete?.();
     }
   }
 
-  // Wenn kein 4-eck gefunden → fallback
+  // Fallback
   if (!bestApprox) {
+    // cleanup
+    srcFull.delete();
     src.delete();
     gray.delete();
     blurred.delete();
     edged.delete();
+    closed.delete();
     contours.delete();
     hierarchy.delete();
+    kernel.delete();
 
     return fileToJpegBlob(imageFile);
   }
 
-  // Punkte aus approx lesen
-  // approx.data32S enthält [x0,y0,x1,y1,x2,y2,x3,y3]
-  const pts = [
+  // Punkte aus approx lesen (scaled Koordinaten)
+  const ptsScaled = [
     { x: bestApprox.data32S[0], y: bestApprox.data32S[1] },
     { x: bestApprox.data32S[2], y: bestApprox.data32S[3] },
     { x: bestApprox.data32S[4], y: bestApprox.data32S[5] },
     { x: bestApprox.data32S[6], y: bestApprox.data32S[7] },
   ];
 
+  // zurück auf Full-Resolution (wenn gescaled)
+  const invScale = scale < 1 ? 1 / scale : 1;
+  const pts = ptsScaled.map((p) => ({ x: p.x * invScale, y: p.y * invScale }));
+
   const [tl, tr, br, bl] = orderPoints(pts);
 
-  // Zielbreite/-höhe anhand der Distanzen berechnen
+  // Zielgröße berechnen
   const widthA = distance(br, bl);
   const widthB = distance(tr, tl);
   const maxW = Math.max(widthA, widthB);
@@ -157,7 +211,6 @@ export async function scanDocumentFromImage(imageFile: File): Promise<Blob> {
   const dstW = Math.max(1, Math.round(maxW));
   const dstH = Math.max(1, Math.round(maxH));
 
-  // Source / Dest Mat für Perspective Transform
   const srcTri = cv.matFromArray(4, 1, cv.CV_32FC2, [
     tl.x, tl.y,
     tr.x, tr.y,
@@ -175,28 +228,37 @@ export async function scanDocumentFromImage(imageFile: File): Promise<Blob> {
   const M = cv.getPerspectiveTransform(srcTri, dstTri);
   const dst = new cv.Mat();
 
-  cv.warpPerspective(src, dst, M, new cv.Size(dstW, dstH));
+  // Warp auf FULL-res Quelle (wichtig!)
+  cv.warpPerspective(srcFull, dst, M, new cv.Size(dstW, dstH));
 
-  // Ergebnis in canvas schreiben
+  // Optional: “scanner look” leicht erhöhen (kannst du aktivieren)
+  // const dstGray = new cv.Mat();
+  // cv.cvtColor(dst, dstGray, cv.COLOR_RGBA2GRAY);
+  // cv.adaptiveThreshold(dstGray, dstGray, 255, cv.ADAPTIVE_THRESH_GAUSSIAN_C, cv.THRESH_BINARY, 21, 10);
+  // cv.cvtColor(dstGray, dst, cv.COLOR_GRAY2RGBA);
+  // dstGray.delete();
+
   const outCanvas = document.createElement("canvas");
   outCanvas.width = dstW;
   outCanvas.height = dstH;
   cv.imshow(outCanvas, dst);
 
   // Cleanup
+  srcFull.delete();
   src.delete();
   gray.delete();
   blurred.delete();
   edged.delete();
+  closed.delete();
   contours.delete();
   hierarchy.delete();
+  kernel.delete();
   bestApprox.delete?.();
   srcTri.delete();
   dstTri.delete();
   M.delete();
   dst.delete();
 
-  // Blob erzeugen
   return await new Promise<Blob>((resolve, reject) => {
     outCanvas.toBlob(
       (blob) => (blob ? resolve(blob) : reject(new Error("toBlob failed"))),
