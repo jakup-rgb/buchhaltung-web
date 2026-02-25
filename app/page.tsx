@@ -11,27 +11,28 @@ type ReceiptItem = {
   createdTime?: string | null;
 };
 
-type Extracted = {
-  date?: string | null;
-  vendor?: string | null;
-  total?: number | string | null; // manche Extracts liefern string
-  currency?: string | null;
-  category?: string | null;
-  confidence?: number | null;
+type Category = "KFZ" | "MARKT" | "BUERO" | "RESTAURANT" | "SONSTIGES";
+
+type ReviewForm = {
+  date: string;
+  time: string; // optional (kann leer bleiben)
+  vendor: string;
+  total: string; // string fürs Input (wir wandeln beim Upload um)
+  currency: string;
+  category: Category;
+  invoiceNumber: string;
+  companyType: "INTERN" | "EXTERN";
+  internalCompany: "RWD" | "DIEM" | "";
+  confidence: number; // 0..1
 };
 
 const HISTORY_KEY = "historyClearedAt";
 const LAST_RESULT_KEY = "lastResult";
 const MAX_VISIBLE_RECEIPTS = 50;
 
-const CATEGORIES = ["MARKT", "KFZ", "RESTAURANT", "BÜRO", "SONSTIGES"];
-
 export default function Page() {
   const { data: session, status } = useSession();
   const isLoggedIn = !!session;
-
-  const [file, setFile] = useState<File | null>(null);
-  const [preview, setPreview] = useState<string | null>(null);
 
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<any>(null);
@@ -44,37 +45,31 @@ export default function Page() {
 
   const [historyClearedAt, setHistoryClearedAt] = useState<number>(0);
 
-  // ----- Review Modal State -----
-  const [reviewOpen, setReviewOpen] = useState(false);
-  const [reviewBusy, setReviewBusy] = useState(false);
-  const [scanBlob, setScanBlob] = useState<Blob | null>(null);
-  const [reviewImageUrl, setReviewImageUrl] = useState<string | null>(null);
+  // ---- Datei/Preview/Scan ----
+  const [rawFile, setRawFile] = useState<File | null>(null);
+  const [scannedFile, setScannedFile] = useState<File | null>(null);
 
-  const [form, setForm] = useState<{
-    date: string;
-    vendor: string;
-    total: string; // als String im Input
-    currency: string;
-    category: string;
-    confidence: number;
-  }>({
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null); // raw preview
+  const [scannedPreviewUrl, setScannedPreviewUrl] = useState<string | null>(null); // scanned preview
+
+  // ---- Review Modal ----
+  const [reviewOpen, setReviewOpen] = useState(false);
+  const [reviewForm, setReviewForm] = useState<ReviewForm>({
     date: "",
+    time: "",
     vendor: "",
     total: "",
     currency: "EUR",
     category: "SONSTIGES",
+    invoiceNumber: "",
+    companyType: "EXTERN",
+    internalCompany: "",
     confidence: 0,
   });
 
   const excelLink = useMemo(() => result?.excel?.webViewLink ?? null, [result]);
 
-  const clearHistoryView = () => {
-    const ts = Date.now();
-    setHistoryClearedAt(ts);
-    localStorage.setItem(HISTORY_KEY, String(ts));
-    setItems([]);
-  };
-
+  // -------------- helpers --------------
   const applyHistoryFilter = (all: ReceiptItem[], clearedAt: number) => {
     const filtered = all.filter((it) => {
       if (!clearedAt) return true;
@@ -96,13 +91,11 @@ export default function Page() {
       } catch {
         data = { raw: text };
       }
-
       if (!res.ok) {
         setItems([]);
         setResult({ error: true, status: res.status, data });
         return;
       }
-
       const all = (data.items ?? []) as ReceiptItem[];
       setItems(applyHistoryFilter(all, historyClearedAt));
     } finally {
@@ -110,111 +103,133 @@ export default function Page() {
     }
   };
 
-  // ----- Review flow -----
-  const openReview = async (originalFile: File) => {
-    if (!session) return;
+  const clearHistoryView = () => {
+    const ts = Date.now();
+    setHistoryClearedAt(ts);
+    localStorage.setItem(HISTORY_KEY, String(ts));
+    setItems([]);
+  };
+
+  // -------------- Review Open (nach Auswahl) --------------
+  const openReviewForFile = async (f: File) => {
+    // 1) Preview setzen (raw)
+    const rawUrl = URL.createObjectURL(f);
+    setPreviewUrl(rawUrl);
+    setRawFile(f);
+
+    // 2) Scannen/Croppen (OpenCV)
+    let scanned: File | null = null;
+    try {
+      const scannedBlob = await scanDocumentFromImage(f);
+      scanned = new File([scannedBlob], f.name.replace(/\.\w+$/, "") + "_scan.jpg", {
+        type: "image/jpeg",
+      });
+      setScannedFile(scanned);
+
+      const scanUrl = URL.createObjectURL(scanned);
+      setScannedPreviewUrl(scanUrl);
+    } catch (e) {
+      // falls Scan fehlschlägt: nimm original
+      setScannedFile(f);
+      setScannedPreviewUrl(rawUrl);
+    }
+
+    // 3) Jetzt: Extraktion machen (ohne Upload)
+    // Dafür brauchst du idealerweise /api/extract
+    // Falls du das (noch) nicht hast: wir öffnen Modal trotzdem,
+    // und du kannst manuell tippen. Wenn /api/extract existiert, füllen wir automatisch.
+    try {
+      const fd = new FormData();
+      fd.append("image", scanned ?? f);
+
+      const res = await fetch("/api/extract", { method: "POST", body: fd });
+      if (res.ok) {
+        const data = await res.json();
+        // erwartet: { extracted: {...} }
+        const ex = data?.extracted ?? data ?? {};
+
+        setReviewForm((prev) => ({
+          ...prev,
+          date: ex.date ?? prev.date ?? "",
+          time: ex.time ?? "",
+          vendor: ex.vendor ?? "",
+          total:
+            typeof ex.total === "number"
+              ? String(ex.total)
+              : typeof ex.total === "string"
+              ? ex.total
+              : "",
+          currency: ex.currency ?? "EUR",
+          category: (ex.category as Category) ?? "SONSTIGES",
+          invoiceNumber: ex.invoiceNumber ?? "",
+          companyType: ex.companyType === "INTERN" ? "INTERN" : "EXTERN",
+          internalCompany: ex.internalCompany ?? "",
+          confidence: typeof ex.confidence === "number" ? ex.confidence : 0,
+        }));
+      } else {
+        // kein extract endpoint oder error -> einfach leer lassen
+      }
+    } catch {
+      // ignore
+    }
 
     setReviewOpen(true);
-    setReviewBusy(true);
-    setScanBlob(null);
-    setReviewImageUrl(null);
+  };
 
-    try {
-      // 1) OpenCV scan/crop -> Blob
-      const scanned = await scanDocumentFromImage(originalFile);
-      setScanBlob(scanned);
+  // -------------- onPick --------------
+  const onPick = async (f: File | null) => {
+    setResult(null);
 
-      const imgUrl = URL.createObjectURL(scanned);
-      setReviewImageUrl(imgUrl);
+    // Reset
+    if (!f) {
+      setRawFile(null);
+      setScannedFile(null);
 
-      // 2) Preview API: OCR/Extract (ohne Upload)
-      const fd = new FormData();
-      fd.append(
-        "image",
-        new File([scanned], originalFile.name || "scan.jpg", { type: "image/jpeg" })
-      );
+      if (previewUrl) URL.revokeObjectURL(previewUrl);
+      if (scannedPreviewUrl) URL.revokeObjectURL(scannedPreviewUrl);
 
-      const res = await fetch("/api/preview", { method: "POST", body: fd });
-      const text = await res.text();
-      let data: any;
-      try {
-        data = JSON.parse(text);
-      } catch {
-        data = { raw: text };
-      }
+      setPreviewUrl(null);
+      setScannedPreviewUrl(null);
 
-      if (!res.ok) {
-        setResult({ error: true, status: res.status, data });
-        setReviewOpen(false);
-        return;
-      }
-
-      const ex: Extracted = data.extracted ?? {};
-
-      const totalStr =
-        typeof ex.total === "number"
-          ? String(ex.total)
-          : typeof ex.total === "string"
-          ? ex.total
-          : "";
-
-      setForm({
-        date: (ex.date ?? "") as any,
-        vendor: (ex.vendor ?? "") as any,
-        total: totalStr,
-        currency: (ex.currency ?? "EUR") as any,
-        category: (ex.category ?? "SONSTIGES") as any,
-        confidence: typeof ex.confidence === "number" ? ex.confidence : 0,
-      });
-    } finally {
-      setReviewBusy(false);
+      setReviewOpen(false);
+      return;
     }
+
+    await openReviewForFile(f);
   };
 
-  const closeReview = () => {
-    setReviewOpen(false);
-    setReviewBusy(false);
-    setScanBlob(null);
-
-    if (reviewImageUrl) URL.revokeObjectURL(reviewImageUrl);
-    setReviewImageUrl(null);
-
-    // Auswahl zurücksetzen
-    setFile(null);
-    if (preview) URL.revokeObjectURL(preview);
-    setPreview(null);
-  };
-
+  // -------------- Upload (nach Bestätigen) --------------
   const confirmAndUpload = async () => {
-    if (!file || !scanBlob) return;
+    const f = scannedFile ?? rawFile;
+    if (!f) return;
 
     setBusy(true);
     try {
       const fd = new FormData();
+      fd.append("image", f);
 
-      const scannedFile = new File([scanBlob], file.name || "scan.jpg", {
-        type: "image/jpeg",
-      });
-      fd.append("image", scannedFile);
-
-      const normalizedTotal =
-        form.total.trim() === ""
-          ? null
-          : Number(String(form.total).replace(",", "."));
-
+      // overrides aus dem Modal
       const overrides = {
-        date: form.date.trim() === "" ? null : form.date.trim(),
-        vendor: form.vendor.trim() === "" ? null : form.vendor.trim(),
-        total: Number.isFinite(normalizedTotal as any) ? normalizedTotal : null,
-        currency: form.currency.trim() === "" ? null : form.currency.trim(),
-        category: form.category || null,
-        confidence: form.confidence ?? 0,
+        date: reviewForm.date || null,
+        time: reviewForm.time || null,
+        vendor: reviewForm.vendor || null,
+        total:
+          reviewForm.total.trim() === ""
+            ? null
+            : Number(String(reviewForm.total).replace(",", ".")),
+        currency: reviewForm.currency || null,
+        category: reviewForm.category,
+        invoiceNumber: reviewForm.invoiceNumber || null,
+        companyType: reviewForm.companyType,
+        internalCompany: reviewForm.internalCompany || null,
+        confidence: reviewForm.confidence ?? 0,
       };
 
       fd.append("overrides", JSON.stringify(overrides));
 
       const res = await fetch("/api/upload", { method: "POST", body: fd });
       const text = await res.text();
+
       let data: any;
       try {
         data = JSON.parse(text);
@@ -230,26 +245,15 @@ export default function Page() {
       setResult(data);
       localStorage.setItem(LAST_RESULT_KEY, JSON.stringify(data));
 
+      setReviewOpen(false);
       await loadReceipts();
-      closeReview();
+      await onPick(null);
     } finally {
       setBusy(false);
     }
   };
 
-  // ----- File picker -----
-  const onPick = async (f: File | null) => {
-    if (f) setResult(null);
-
-    setFile(f);
-    setPreview(f ? URL.createObjectURL(f) : null);
-
-    if (f) {
-      await openReview(f); // ✅ richtig
-    }
-  };
-
-  // Restore last result + history
+  // -------------- restore lastResult + history --------------
   useEffect(() => {
     const saved = localStorage.getItem(LAST_RESULT_KEY);
     if (saved) {
@@ -265,19 +269,17 @@ export default function Page() {
     }
   }, []);
 
-  // Load list on login
   useEffect(() => {
     if (session) loadReceipts();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session]);
 
-  // Refilter when history changes
   useEffect(() => {
     setItems((prev) => applyHistoryFilter(prev, historyClearedAt));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [historyClearedAt]);
 
-  // Close menu on outside click
+  // Menü schließen bei Klick außerhalb
   useEffect(() => {
     const onDocClick = (e: MouseEvent) => {
       if (!menuRef.current) return;
@@ -287,7 +289,7 @@ export default function Page() {
     return () => document.removeEventListener("mousedown", onDocClick);
   }, []);
 
-  // ---------- UI ----------
+  // -------------- UI --------------
   if (status === "loading") {
     return (
       <main style={styles.page}>
@@ -308,6 +310,7 @@ export default function Page() {
           <p style={styles.subtitleTop}>
             Belege fotografieren und automatisch in Drive + Excel speichern.
           </p>
+
           <div style={styles.loginCenter}>
             <button style={styles.primaryBtnLarge} onClick={() => signIn("google")}>
               Login
@@ -328,6 +331,7 @@ export default function Page() {
             <div style={styles.mutedSmall}>Angemeldet {session.user?.email}</div>
           </div>
 
+          {/* Menü */}
           <div style={{ position: "relative" }} ref={menuRef}>
             <button
               style={styles.menuBtn}
@@ -378,13 +382,7 @@ export default function Page() {
             )}
           </div>
 
-          {/* optional: preview unterm input */}
-          {preview && (
-            <div style={{ marginTop: 12 }}>
-              <img src={preview} alt="preview" style={styles.previewImg} />
-            </div>
-          )}
-
+          {/* Debug */}
           {result && (
             <details style={{ marginTop: 12 }}>
               <summary style={styles.detailsSummary}>Letztes Ergebnis anzeigen</summary>
@@ -449,109 +447,158 @@ export default function Page() {
         </section>
       </div>
 
-      {/* ---------- Review Modal ---------- */}
+      {/* -------- Review Modal -------- */}
       {reviewOpen && (
         <div style={styles.modalOverlay} role="dialog" aria-modal="true">
           <div style={styles.modalCard}>
             <div style={styles.modalHeader}>
               <div>
-                <div style={{ fontWeight: 800, fontSize: 18 }}>Beleg prüfen</div>
-                <div style={styles.mutedSmall}>
-                  {reviewBusy ? "Analysiere…" : "Daten prüfen und ggf. korrigieren"}
-                </div>
+                <div style={styles.modalTitle}>Beleg prüfen</div>
+                <div style={styles.mutedSmall}>Daten prüfen und ggf. korrigieren</div>
               </div>
-
-              <button style={styles.modalClose} onClick={closeReview} disabled={reviewBusy || busy}>
+              <button
+                style={styles.modalClose}
+                onClick={() => setReviewOpen(false)}
+                aria-label="Schließen"
+              >
                 ✕
               </button>
             </div>
 
             <div style={styles.modalBody}>
-              <div style={styles.modalGrid}>
-                <div style={styles.modalPreview}>
-                  {reviewImageUrl ? (
-                    <img src={reviewImageUrl} alt="scan preview" style={styles.modalImg} />
-                  ) : (
-                    <div style={styles.muted}>Kein Preview</div>
-                  )}
-                </div>
+              {/* Image */}
+              <div style={styles.modalImageWrap}>
+                {scannedPreviewUrl ? (
+                  <img src={scannedPreviewUrl} alt="scan preview" style={styles.modalImg} />
+                ) : previewUrl ? (
+                  <img src={previewUrl} alt="preview" style={styles.modalImg} />
+                ) : null}
+              </div>
 
-                <div style={styles.modalForm}>
-                  <label style={styles.label}>
-                    Datum (YYYY-MM-DD)
-                    <input
-                      style={styles.input}
-                      value={form.date}
-                      onChange={(e) => setForm((p) => ({ ...p, date: e.target.value }))}
-                      placeholder="2026-02-24"
-                      disabled={reviewBusy || busy}
-                    />
-                  </label>
+              {/* Form */}
+              <div style={styles.formGrid}>
+                <Field label="Datum (YYYY-MM-DD)">
+                  <input
+                    style={styles.input}
+                    value={reviewForm.date}
+                    onChange={(e) => setReviewForm((p) => ({ ...p, date: e.target.value }))}
+                    placeholder="2026-02-19"
+                  />
+                </Field>
 
-                  <label style={styles.label}>
-                    Händler / Vendor
-                    <input
-                      style={styles.input}
-                      value={form.vendor}
-                      onChange={(e) => setForm((p) => ({ ...p, vendor: e.target.value }))}
-                      placeholder="BILLA / OMV / ..."
-                      disabled={reviewBusy || busy}
-                    />
-                  </label>
+                <Field label="Uhrzeit (optional)">
+                  <input
+                    style={styles.input}
+                    value={reviewForm.time}
+                    onChange={(e) => setReviewForm((p) => ({ ...p, time: e.target.value }))}
+                    placeholder="17:45"
+                  />
+                </Field>
 
-                  <label style={styles.label}>
-                    Betrag
-                    <input
-                      style={styles.input}
-                      value={form.total}
-                      onChange={(e) => setForm((p) => ({ ...p, total: e.target.value }))}
-                      placeholder="13.97"
-                      inputMode="decimal"
-                      disabled={reviewBusy || busy}
-                    />
-                  </label>
+                <Field label="Händler / Vendor">
+                  <input
+                    style={styles.input}
+                    value={reviewForm.vendor}
+                    onChange={(e) => setReviewForm((p) => ({ ...p, vendor: e.target.value }))}
+                    placeholder="BILLA / OMV / ..."
+                  />
+                </Field>
 
-                  <label style={styles.label}>
-                    Währung
-                    <input
-                      style={styles.input}
-                      value={form.currency}
-                      onChange={(e) => setForm((p) => ({ ...p, currency: e.target.value }))}
-                      disabled={reviewBusy || busy}
-                    />
-                  </label>
+                <Field label="Betrag">
+                  <input
+                    style={styles.input}
+                    value={reviewForm.total}
+                    onChange={(e) => setReviewForm((p) => ({ ...p, total: e.target.value }))}
+                    placeholder="13.97"
+                    inputMode="decimal"
+                  />
+                </Field>
 
-                  <label style={styles.label}>
-                    Kategorie
+                <Field label="Währung">
+                  <input
+                    style={styles.input}
+                    value={reviewForm.currency}
+                    onChange={(e) => setReviewForm((p) => ({ ...p, currency: e.target.value }))}
+                    placeholder="EUR"
+                  />
+                </Field>
+
+                <Field label="Kategorie">
+                  <select
+                    style={styles.input}
+                    value={reviewForm.category}
+                    onChange={(e) => setReviewForm((p) => ({ ...p, category: e.target.value as Category }))}
+                  >
+                    <option value="KFZ">KFZ</option>
+                    <option value="MARKT">MARKT</option>
+                    <option value="BUERO">BUERO</option>
+                    <option value="RESTAURANT">RESTAURANT</option>
+                    <option value="SONSTIGES">SONSTIGES</option>
+                  </select>
+                </Field>
+
+                <Field label="Rechnungsnummer (optional)">
+                  <input
+                    style={styles.input}
+                    value={reviewForm.invoiceNumber}
+                    onChange={(e) => setReviewForm((p) => ({ ...p, invoiceNumber: e.target.value }))}
+                    placeholder="z.B. 012345"
+                  />
+                </Field>
+
+                <Field label="Firma (Intern/Extern)">
+                  <select
+                    style={styles.input}
+                    value={reviewForm.companyType}
+                    onChange={(e) =>
+                      setReviewForm((p) => ({
+                        ...p,
+                        companyType: e.target.value as "INTERN" | "EXTERN",
+                      }))
+                    }
+                  >
+                    <option value="EXTERN">EXTERN</option>
+                    <option value="INTERN">INTERN</option>
+                  </select>
+                </Field>
+
+                {reviewForm.companyType === "INTERN" && (
+                  <Field label="Interne Firma">
                     <select
                       style={styles.input}
-                      value={form.category}
-                      onChange={(e) => setForm((p) => ({ ...p, category: e.target.value }))}
-                      disabled={reviewBusy || busy}
+                      value={reviewForm.internalCompany}
+                      onChange={(e) =>
+                        setReviewForm((p) => ({
+                          ...p,
+                          internalCompany: e.target.value as "RWD" | "DIEM" | "",
+                        }))
+                      }
                     >
-                      {CATEGORIES.map((c) => (
-                        <option key={c} value={c}>
-                          {c}
-                        </option>
-                      ))}
+                      <option value="">Bitte wählen…</option>
+                      <option value="RWD">RWD</option>
+                      <option value="DIEM">DIEM</option>
                     </select>
-                  </label>
+                  </Field>
+                )}
 
-                  <div style={{ ...styles.mutedSmall, marginTop: 8 }}>
-                    Confidence: {Math.round((form.confidence ?? 0) * 100)}%
-                  </div>
+                <div style={{ marginTop: 6, opacity: 0.8 }}>
+                  Confidence: {Math.round((reviewForm.confidence ?? 0) * 100)}%
                 </div>
               </div>
             </div>
 
             <div style={styles.modalFooter}>
-              <button style={styles.secondaryBtn} onClick={closeReview} disabled={busy || reviewBusy}>
+              <button
+                style={{ ...styles.secondaryBtn, opacity: busy ? 0.6 : 1 }}
+                onClick={() => setReviewOpen(false)}
+                disabled={busy}
+              >
                 Abbrechen
               </button>
               <button
-                style={{ ...styles.primaryBtn, opacity: busy || reviewBusy ? 0.6 : 1 }}
+                style={{ ...styles.primaryBtn, opacity: busy ? 0.6 : 1 }}
                 onClick={confirmAndUpload}
-                disabled={busy || reviewBusy}
+                disabled={busy}
               >
                 {busy ? "Upload…" : "Bestätigen & Upload"}
               </button>
@@ -560,6 +607,16 @@ export default function Page() {
         </div>
       )}
     </main>
+  );
+}
+
+// kleines Field-Wrapper
+function Field({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div style={{ display: "grid", gap: 8 }}>
+      <div style={{ fontWeight: 700 }}>{label}</div>
+      {children}
+    </div>
   );
 }
 
@@ -590,8 +647,15 @@ const styles: Record<string, React.CSSProperties> = {
     gap: 12,
     alignItems: "flex-start",
   },
-  title: { margin: 0, fontSize: 34, letterSpacing: 0.2 },
-  sectionTitle: { margin: 0, fontSize: 18 },
+  title: {
+    margin: 0,
+    fontSize: 34,
+    letterSpacing: 0.2,
+  },
+  sectionTitle: {
+    margin: 0,
+    fontSize: 18,
+  },
   sectionHeaderRow: {
     display: "flex",
     justifyContent: "space-between",
@@ -599,10 +663,27 @@ const styles: Record<string, React.CSSProperties> = {
     alignItems: "center",
     flexWrap: "wrap",
   },
-  muted: { opacity: 0.8, margin: 0 },
-  mutedSmall: { opacity: 0.75, fontSize: 12, marginTop: 6 },
-  hr: { margin: "16px 0", border: "none", borderTop: "1px solid #2a2c31" },
-  uploadRow: { marginTop: 10, display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" },
+  muted: {
+    opacity: 0.8,
+    margin: 0,
+  },
+  mutedSmall: {
+    opacity: 0.75,
+    fontSize: 12,
+    marginTop: 6,
+  },
+  hr: {
+    margin: "16px 0",
+    border: "none",
+    borderTop: "1px solid #2a2c31",
+  },
+  uploadRow: {
+    marginTop: 10,
+    display: "flex",
+    gap: 10,
+    flexWrap: "wrap",
+    alignItems: "center",
+  },
   fileInput: {
     background: "#0d0e10",
     border: "1px solid #2a2c31",
@@ -615,18 +696,18 @@ const styles: Record<string, React.CSSProperties> = {
     color: "#0b0b0c",
     border: "none",
     borderRadius: 10,
-    padding: "10px 14px",
+    padding: "12px 14px",
     cursor: "pointer",
-    fontWeight: 700,
+    fontWeight: 800,
   },
   secondaryBtn: {
     background: "transparent",
     color: "#f3f3f3",
     border: "1px solid #2a2c31",
     borderRadius: 10,
-    padding: "10px 14px",
+    padding: "12px 14px",
     cursor: "pointer",
-    fontWeight: 600,
+    fontWeight: 700,
   },
   linkBtn: {
     color: "#f3f3f3",
@@ -636,7 +717,6 @@ const styles: Record<string, React.CSSProperties> = {
     padding: "10px 14px",
     display: "inline-block",
   },
-  previewImg: { maxWidth: "100%", borderRadius: 12, border: "1px solid #2a2c31" },
   codeBlock: {
     marginTop: 10,
     background: "#0b0b0c",
@@ -647,7 +727,10 @@ const styles: Record<string, React.CSSProperties> = {
     border: "1px solid #26282c",
     maxHeight: 360,
   },
-  detailsSummary: { cursor: "pointer", opacity: 0.9 },
+  detailsSummary: {
+    cursor: "pointer",
+    opacity: 0.9,
+  },
   listItem: {
     border: "1px solid #26282c",
     borderRadius: 12,
@@ -658,8 +741,15 @@ const styles: Record<string, React.CSSProperties> = {
     gap: 12,
     background: "#0f1012",
   },
-  itemTitle: { fontWeight: 700, wordBreak: "break-word" },
-  itemMeta: { fontSize: 12, opacity: 0.7, marginTop: 4 },
+  itemTitle: {
+    fontWeight: 800,
+    wordBreak: "break-word",
+  },
+  itemMeta: {
+    fontSize: 12,
+    opacity: 0.7,
+    marginTop: 4,
+  },
   menuBtn: {
     background: "transparent",
     color: "#f3f3f3",
@@ -690,11 +780,24 @@ const styles: Record<string, React.CSSProperties> = {
     border: "none",
     padding: "12px 12px",
     cursor: "pointer",
-    fontWeight: 700,
+    fontWeight: 800,
   },
-  titleTop: { margin: 0, fontSize: 36, textAlign: "center" },
-  subtitleTop: { opacity: 0.8, marginTop: 8, textAlign: "center" },
-  loginCenter: { position: "absolute", top: "50%", left: "50%", transform: "translate(-50%, -50%)" },
+  titleTop: {
+    margin: 0,
+    fontSize: 36,
+    textAlign: "center",
+  },
+  subtitleTop: {
+    opacity: 0.8,
+    marginTop: 8,
+    textAlign: "center",
+  },
+  loginCenter: {
+    position: "absolute",
+    top: "50%",
+    left: "50%",
+    transform: "translate(-50%, -50%)",
+  },
   primaryBtnLarge: {
     background: "#f3f3f3",
     color: "#0b0b0c",
@@ -702,30 +805,31 @@ const styles: Record<string, React.CSSProperties> = {
     borderRadius: 14,
     padding: "16px 28px",
     cursor: "pointer",
-    fontWeight: 700,
+    fontWeight: 900,
     fontSize: 18,
     boxShadow: "0 8px 30px rgba(0,0,0,0.4)",
   },
 
-  // Modal styles
+  // ---- Modal ----
   modalOverlay: {
     position: "fixed",
     inset: 0,
     background: "rgba(0,0,0,0.65)",
-    display: "flex",
-    justifyContent: "center",
-    alignItems: "flex-start",
-    padding: 16,
-    zIndex: 50,
-    overflowY: "auto",
+    display: "grid",
+    placeItems: "center",
+    padding: 14,
+    zIndex: 1000,
   },
   modalCard: {
     width: "100%",
-    maxWidth: 920,
+    maxWidth: 820,
+    maxHeight: "90dvh",
     background: "#111214",
     border: "1px solid #26282c",
     borderRadius: 16,
-    boxShadow: "0 20px 60px rgba(0,0,0,0.5)",
+    boxShadow: "0 20px 60px rgba(0,0,0,0.55)",
+    display: "flex",
+    flexDirection: "column",
     overflow: "hidden",
   },
   modalHeader: {
@@ -736,53 +840,47 @@ const styles: Record<string, React.CSSProperties> = {
     alignItems: "flex-start",
     gap: 12,
   },
+  modalTitle: {
+    fontSize: 20,
+    fontWeight: 900,
+  },
   modalClose: {
     background: "transparent",
-    color: "#f3f3f3",
     border: "1px solid #2a2c31",
+    color: "#f3f3f3",
     borderRadius: 10,
-    padding: "6px 10px",
+    padding: "8px 10px",
     cursor: "pointer",
-    fontWeight: 800,
   },
-  modalBody: { padding: 14 },
-  modalGrid: { display: "grid", gridTemplateColumns: "1fr", gap: 14 },
-  modalPreview: {
+  modalBody: {
+    padding: 14,
+    overflow: "auto", // ✅ scrollt jetzt
+    display: "grid",
+    gap: 14,
+  },
+  modalImageWrap: {
     border: "1px solid #26282c",
-    borderRadius: 12,
+    borderRadius: 14,
+    overflow: "hidden",
     background: "#0f1012",
-    padding: 10,
   },
   modalImg: {
     width: "100%",
     height: "auto",
-    borderRadius: 10,
-    border: "1px solid #2a2c31",
     display: "block",
   },
-  modalForm: {
-    border: "1px solid #26282c",
-    borderRadius: 12,
-    background: "#0f1012",
-    padding: 12,
+  formGrid: {
     display: "grid",
-    gap: 10,
-  },
-  label: {
-    display: "grid",
-    gap: 6,
-    fontSize: 12,
-    opacity: 0.9,
-    fontWeight: 700,
+    gap: 14,
   },
   input: {
-    background: "#0b0b0c",
+    width: "100%",
+    background: "#0d0e10",
     border: "1px solid #2a2c31",
-    borderRadius: 10,
-    padding: "10px 12px",
+    borderRadius: 12,
+    padding: 12,
     color: "#f3f3f3",
     outline: "none",
-    width: "100%",
   },
   modalFooter: {
     padding: 14,
