@@ -3,7 +3,11 @@ import { Readable } from "stream";
 
 type RowData = {
   date: string | null;
+  time?: string | null;              // NEU
+  invoiceNumber?: string | null;     // NEU
   vendor: string | null;
+  companyType?: "INTERN" | "EXTERN"; // NEU
+  internalCompany?: string | null;   // NEU
   total: number | null;
   currency: string | null;
   category: string;
@@ -40,13 +44,17 @@ function toNodeBuffer(x: any): Buffer {
 function ensureHeader(ws: ExcelJS.Worksheet) {
   const headers = [
     "Datum",
-    "Lieferant",
+    "Uhrzeit",
+    "Rechnungsnummer",
+    "Vendor",
+    "Company Type",
+    "Interne Firma",
     "Betrag",
     "Währung",
     "Kategorie",
     "PDF Name",
-    "Drive Link",
-    "Drive FileId",
+    "PDF Link",
+    "PDF File ID",
     "Confidence",
   ];
 
@@ -121,18 +129,25 @@ export async function appendRowToDriveExcel(params: {
   const lastDataRow = findLastDataRow(ws);
   const targetRowIndex = lastDataRow + 1;
 
-  // ✅ Werte direkt in Zellen schreiben (super stabil)
-  const r = ws.getRow(targetRowIndex);
-  r.getCell(1).value = normalizeDate(row.date);
-  r.getCell(2).value = row.vendor ?? "";
-  r.getCell(3).value = normalizeTotal(row.total);
-  r.getCell(4).value = row.currency ?? "";
-  r.getCell(5).value = row.category ?? "";
-  r.getCell(6).value = row.pdfName ?? "";
-  r.getCell(7).value = row.pdfWebViewLink ?? "";
-  r.getCell(8).value = row.pdfFileId ?? "";
-  r.getCell(9).value = typeof row.confidence === "number" ? row.confidence : 0;
-  r.commit?.();
+// ✅ Werte direkt in Zellen schreiben (erweitert)
+const r = ws.getRow(targetRowIndex);
+
+r.getCell(1).value = normalizeDate(row.date);            // Datum
+r.getCell(2).value = row.time ?? "";                    // Uhrzeit
+r.getCell(3).value = row.invoiceNumber ?? "";           // Rechnungsnummer
+r.getCell(4).value = row.vendor ?? "";                  // Vendor
+r.getCell(5).value = row.companyType ?? "EXTERN";       // INTERN/EXTERN
+r.getCell(6).value = row.internalCompany ?? "";         // RWD/DIEM
+r.getCell(7).value = normalizeTotal(row.total);         // Betrag
+r.getCell(8).value = row.currency ?? "";                // Währung
+r.getCell(9).value = row.category ?? "";                // Kategorie
+r.getCell(10).value = row.pdfName ?? "";                // PDF Name
+r.getCell(11).value = row.pdfWebViewLink ?? "";         // PDF Link
+r.getCell(12).value = row.pdfFileId ?? "";              // File ID
+r.getCell(13).value =
+  typeof row.confidence === "number" ? row.confidence : 0; // Confidence
+
+r.commit?.();
 
   const out = await wb.xlsx.writeBuffer();
   const outBuffer = toNodeBuffer(out);
