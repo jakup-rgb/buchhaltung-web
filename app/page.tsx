@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { signIn, signOut, useSession } from "next-auth/react";
-import Cropper, { Area } from "react-easy-crop";
+import Cropper from "react-easy-crop";
 
 type ReceiptItem = {
   id: string;
@@ -12,14 +12,17 @@ type ReceiptItem = {
 };
 
 type Category = "KFZ" | "MARKT" | "BUERO" | "RESTAURANT" | "SONSTIGES";
-const CATEGORIES: Category[] = ["KFZ", "MARKT", "BUERO", "RESTAURANT", "SONSTIGES"];
 
 type ReviewForm = {
   date: string;
+  time: string; // optional (kann leer bleiben)
   vendor: string;
-  total: string;
+  total: string; // string fürs Input (wir wandeln beim Upload um)
   currency: string;
   category: Category;
+  invoiceNumber: string;
+  companyType: "INTERN" | "EXTERN";
+  internalCompany: "RWD" | "DIEM" | "";
   confidence: number; // 0..1
 };
 
@@ -27,39 +30,33 @@ const HISTORY_KEY = "historyClearedAt";
 const LAST_RESULT_KEY = "lastResult";
 const MAX_VISIBLE_RECEIPTS = 50;
 
-function fileExtToMime(name: string) {
-  const lower = name.toLowerCase();
-  if (lower.endsWith(".png")) return "image/png";
-  if (lower.endsWith(".webp")) return "image/webp";
-  return "image/jpeg";
-}
+type Area = { width: number; height: number; x: number; y: number };
 
-// ---- Crop helpers ----
-function createImage(url: string): Promise<HTMLImageElement> {
+async function createImage(url: string): Promise<HTMLImageElement> {
   return new Promise((resolve, reject) => {
     const img = new Image();
-    img.onload = () => resolve(img);
-    img.onerror = reject;
+    img.addEventListener("load", () => resolve(img));
+    img.addEventListener("error", (e) => reject(e));
     img.crossOrigin = "anonymous";
     img.src = url;
   });
 }
 
-async function getCroppedBlob(imageSrc: string, crop: Area): Promise<Blob> {
+async function getCroppedImageBlob(imageSrc: string, pixelCrop: Area): Promise<Blob> {
   const image = await createImage(imageSrc);
   const canvas = document.createElement("canvas");
   const ctx = canvas.getContext("2d");
-  if (!ctx) throw new Error("No 2D context");
+  if (!ctx) throw new Error("No canvas context");
 
-  canvas.width = Math.max(1, Math.round(crop.width));
-  canvas.height = Math.max(1, Math.round(crop.height));
+  canvas.width = Math.max(1, Math.round(pixelCrop.width));
+  canvas.height = Math.max(1, Math.round(pixelCrop.height));
 
   ctx.drawImage(
     image,
-    crop.x,
-    crop.y,
-    crop.width,
-    crop.height,
+    pixelCrop.x,
+    pixelCrop.y,
+    pixelCrop.width,
+    pixelCrop.height,
     0,
     0,
     canvas.width,
@@ -68,7 +65,7 @@ async function getCroppedBlob(imageSrc: string, crop: Area): Promise<Blob> {
 
   return await new Promise<Blob>((resolve, reject) => {
     canvas.toBlob(
-      (b) => (b ? resolve(b) : reject(new Error("toBlob failed"))),
+      (blob) => (blob ? resolve(blob) : reject(new Error("toBlob failed"))),
       "image/jpeg",
       0.95
     );
@@ -90,37 +87,35 @@ export default function Page() {
 
   const [historyClearedAt, setHistoryClearedAt] = useState<number>(0);
 
-  // ---- File picker preview on main page ----
-  const [file, setFile] = useState<File | null>(null);
-  const [preview, setPreview] = useState<string | null>(null);
+  // ---- Datei/Preview ----
+  const [rawFile, setRawFile] = useState<File | null>(null);
+  const [finalFile, setFinalFile] = useState<File | null>(null); // das was wirklich hochgeladen wird (cropped oder original)
 
-  // ---- Review Modal ----
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null); // Bild oben im Review
   const [reviewOpen, setReviewOpen] = useState(false);
-  const [reviewBusy, setReviewBusy] = useState(false);
-  const [reviewImageUrl, setReviewImageUrl] = useState<string | null>(null);
 
-  // This is the image that will actually be uploaded (original or cropped)
-  const [reviewBlob, setReviewBlob] = useState<Blob | null>(null);
-  const [reviewFileName, setReviewFileName] = useState<string>("receipt.jpg");
+  // ---- Crop Modal ----
+  const [cropOpen, setCropOpen] = useState(false);
+  const [crop, setCrop] = useState({ x: 0, y: 0 });
+  const [zoom, setZoom] = useState(1);
+  const [croppedAreaPixels, setCroppedAreaPixels] = useState<Area | null>(null);
 
-  const [form, setForm] = useState<ReviewForm>({
+  // ---- Review Form (deine Felder bleiben gleich) ----
+  const [reviewForm, setReviewForm] = useState<ReviewForm>({
     date: "",
+    time: "",
     vendor: "",
     total: "",
     currency: "EUR",
     category: "SONSTIGES",
+    invoiceNumber: "",
+    companyType: "EXTERN",
+    internalCompany: "",
     confidence: 0,
   });
 
-  // ---- Crop Modal ----
-  const [cropOpen, setCropOpen] = useState(false);
-  const [crop, setCrop] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
-  const [zoom, setZoom] = useState(1);
-  const [croppedAreaPixels, setCroppedAreaPixels] = useState<Area | null>(null);
-
   const excelLink = useMemo(() => result?.excel?.webViewLink ?? null, [result]);
 
-  // -------------- helpers --------------
   const applyHistoryFilter = (all: ReceiptItem[], clearedAt: number) => {
     const filtered = all.filter((it) => {
       if (!clearedAt) return true;
@@ -142,13 +137,11 @@ export default function Page() {
       } catch {
         data = { raw: text };
       }
-
       if (!res.ok) {
         setItems([]);
         setResult({ error: true, status: res.status, data });
         return;
       }
-
       const all = (data.items ?? []) as ReceiptItem[];
       setItems(applyHistoryFilter(all, historyClearedAt));
     } finally {
@@ -163,156 +156,161 @@ export default function Page() {
     setItems([]);
   };
 
-  const closeReview = () => {
-    setReviewOpen(false);
-    setReviewBusy(false);
-    setCropOpen(false);
+  // -------- Review öffnen (nach Auswahl) --------
+  const openReviewForFile = async (f: File) => {
+    setResult(null);
 
-    if (reviewImageUrl) URL.revokeObjectURL(reviewImageUrl);
-    setReviewImageUrl(null);
+    // alte URLs sauber entfernen
+    if (previewUrl) URL.revokeObjectURL(previewUrl);
 
-    setReviewBlob(null);
-    setReviewFileName("receipt.jpg");
+    const url = URL.createObjectURL(f);
+    setPreviewUrl(url);
 
-    // reset crop state
-    setCrop({ x: 0, y: 0 });
-    setZoom(1);
-    setCroppedAreaPixels(null);
+    setRawFile(f);
+    setFinalFile(f); // default: original
 
-    // also clear main file picker (optional)
-    setFile(null);
-    if (preview) URL.revokeObjectURL(preview);
-    setPreview(null);
-  };
-
-  async function runPreviewExtraction(blobOrFile: Blob, nameForMime: string) {
-    setReviewBusy(true);
+    // Extraktion (ohne Upload)
     try {
       const fd = new FormData();
-      const mime = (blobOrFile as any).type || fileExtToMime(nameForMime);
-      const upFile = blobOrFile instanceof File ? blobOrFile : new File([blobOrFile], nameForMime, { type: mime });
+      fd.append("image", f);
 
-      fd.append("image", upFile);
+      const res = await fetch("/api/extract", { method: "POST", body: fd });
+      if (res.ok) {
+        const data = await res.json();
+        const ex = data?.extracted ?? data ?? {};
 
-      const res = await fetch("/api/preview", { method: "POST", body: fd });
-      if (!res.ok) return;
-
-      const data = await res.json();
-      const ex = data?.extracted ?? data ?? {};
-
-      setForm({
-        date: ex.date ?? "",
-        vendor: ex.vendor ?? "",
-        total:
-          typeof ex.total === "number"
-            ? String(ex.total)
-            : typeof ex.total === "string"
-            ? ex.total
-            : "",
-        currency: ex.currency ?? "EUR",
-        category: (ex.category as Category) ?? "SONSTIGES",
-        confidence: typeof ex.confidence === "number" ? ex.confidence : 0,
-      });
-    } finally {
-      setReviewBusy(false);
+        setReviewForm((prev) => ({
+          ...prev,
+          date: ex.date ?? prev.date ?? "",
+          time: ex.time ?? "",
+          vendor: ex.vendor ?? "",
+          total:
+            typeof ex.total === "number"
+              ? String(ex.total)
+              : typeof ex.total === "string"
+              ? ex.total
+              : "",
+          currency: ex.currency ?? "EUR",
+          category: (ex.category as Category) ?? "SONSTIGES",
+          invoiceNumber: ex.invoiceNumber ?? "",
+          companyType: ex.companyType === "INTERN" ? "INTERN" : "EXTERN",
+          internalCompany: ex.internalCompany ?? "",
+          confidence: typeof ex.confidence === "number" ? ex.confidence : 0,
+        }));
+      }
+    } catch {
+      // ignore
     }
-  }
-
-  // -------------- Review Open (after file selection) --------------
-  const openReview = async (originalFile: File) => {
-    // set preview for modal
-    const url = URL.createObjectURL(originalFile);
-    setReviewImageUrl(url);
-
-    // IMPORTANT: no auto-cropping anymore
-    setReviewBlob(originalFile);
-    setReviewFileName(originalFile.name || "receipt.jpg");
-
-    // reset form before extraction
-    setForm({
-      date: "",
-      vendor: "",
-      total: "",
-      currency: "EUR",
-      category: "SONSTIGES",
-      confidence: 0,
-    });
 
     setReviewOpen(true);
-
-    // run extraction
-    await runPreviewExtraction(originalFile, originalFile.name || "receipt.jpg");
   };
 
-  // ----- File picker -----
+  // -------- onPick --------
   const onPick = async (f: File | null) => {
-    if (f) setResult(null);
-
-    setFile(f);
-    if (preview) URL.revokeObjectURL(preview);
-    setPreview(f ? URL.createObjectURL(f) : null);
-
-    if (f) {
-      await openReview(f);
-    }
-  };
-
-  // -------------- Manual crop actions --------------
-  const onCropComplete = (_: Area, croppedPixels: Area) => {
-    setCroppedAreaPixels(croppedPixels);
-  };
-
-  const applyCrop = async () => {
-    if (!reviewImageUrl || !croppedAreaPixels) {
+    if (!f) {
+      // reset
+      setRawFile(null);
+      setFinalFile(null);
+      setReviewOpen(false);
       setCropOpen(false);
+      setCroppedAreaPixels(null);
+      setZoom(1);
+      setCrop({ x: 0, y: 0 });
+
+      if (previewUrl) URL.revokeObjectURL(previewUrl);
+      setPreviewUrl(null);
       return;
     }
 
-    setReviewBusy(true);
+    await openReviewForFile(f);
+  };
+
+  // -------- Crop callbacks --------
+  const onCropComplete = (_: any, areaPixels: Area) => {
+    setCroppedAreaPixels(areaPixels);
+  };
+
+  const applyCrop = async () => {
+    if (!previewUrl || !croppedAreaPixels || !rawFile) return;
+
+    setBusy(true);
     try {
-      const cropped = await getCroppedBlob(reviewImageUrl, croppedAreaPixels);
+      const blob = await getCroppedImageBlob(previewUrl, croppedAreaPixels);
+      const cropped = new File(
+        [blob],
+        rawFile.name.replace(/\.\w+$/, "") + "_cropped.jpg",
+        { type: "image/jpeg" }
+      );
 
-      // update upload blob
-      setReviewBlob(cropped);
-      const newName = (reviewFileName || "receipt").replace(/\.\w+$/, "") + "_crop.jpg";
-      setReviewFileName(newName);
+      // Upload soll ab jetzt das Cropped nehmen
+      setFinalFile(cropped);
 
-      // update preview image
+      // Preview oben aktualisieren
+      if (previewUrl) URL.revokeObjectURL(previewUrl);
       const newUrl = URL.createObjectURL(cropped);
-      if (reviewImageUrl) URL.revokeObjectURL(reviewImageUrl);
-      setReviewImageUrl(newUrl);
+      setPreviewUrl(newUrl);
 
-      // re-run extraction on cropped image (usually improves accuracy)
-      await runPreviewExtraction(cropped, newName);
-    } finally {
-      setReviewBusy(false);
       setCropOpen(false);
+
+      // Optional: nach Crop nochmal extrahieren (meist besser)
+      try {
+        const fd = new FormData();
+        fd.append("image", cropped);
+        const res = await fetch("/api/extract", { method: "POST", body: fd });
+        if (res.ok) {
+          const data = await res.json();
+          const ex = data?.extracted ?? data ?? {};
+          setReviewForm((prev) => ({
+            ...prev,
+            date: ex.date ?? prev.date ?? "",
+            time: ex.time ?? prev.time ?? "",
+            vendor: ex.vendor ?? prev.vendor ?? "",
+            total:
+              typeof ex.total === "number"
+                ? String(ex.total)
+                : typeof ex.total === "string"
+                ? ex.total
+                : prev.total ?? "",
+            currency: ex.currency ?? prev.currency ?? "EUR",
+            category: (ex.category as Category) ?? prev.category ?? "SONSTIGES",
+            invoiceNumber: ex.invoiceNumber ?? prev.invoiceNumber ?? "",
+            companyType: ex.companyType === "INTERN" ? "INTERN" : "EXTERN",
+            internalCompany: ex.internalCompany ?? prev.internalCompany ?? "",
+            confidence: typeof ex.confidence === "number" ? ex.confidence : prev.confidence ?? 0,
+          }));
+        }
+      } catch {
+        // ignore
+      }
+    } finally {
+      setBusy(false);
     }
   };
 
-  // -------------- Upload (after confirm) --------------
+  // -------- Upload (nach Bestätigen) --------
   const confirmAndUpload = async () => {
-    if (!reviewBlob) return;
+    const f = finalFile ?? rawFile;
+    if (!f) return;
 
     setBusy(true);
     try {
       const fd = new FormData();
+      fd.append("image", f);
 
-      const mime = (reviewBlob as any).type || "image/jpeg";
-      const uploadFile = reviewBlob instanceof File
-        ? reviewBlob
-        : new File([reviewBlob], reviewFileName || "receipt.jpg", { type: mime });
-
-      fd.append("image", uploadFile);
-
-      // overrides from modal
       const overrides = {
-        date: form.date || null,
-        vendor: form.vendor || null,
-        total: form.total.trim() === "" ? null : Number(String(form.total).replace(",", ".")),
-        currency: form.currency || null,
-        category: form.category,
-        confidence: form.confidence ?? 0,
+        date: reviewForm.date || null,
+        time: reviewForm.time || null,
+        vendor: reviewForm.vendor || null,
+        total:
+          reviewForm.total.trim() === ""
+            ? null
+            : Number(String(reviewForm.total).replace(",", ".")),
+        currency: reviewForm.currency || null,
+        category: reviewForm.category,
+        invoiceNumber: reviewForm.invoiceNumber || null,
+        companyType: reviewForm.companyType,
+        internalCompany: reviewForm.internalCompany || null,
+        confidence: reviewForm.confidence ?? 0,
       };
 
       fd.append("overrides", JSON.stringify(overrides));
@@ -335,14 +333,15 @@ export default function Page() {
       setResult(data);
       localStorage.setItem(LAST_RESULT_KEY, JSON.stringify(data));
 
+      setReviewOpen(false);
       await loadReceipts();
-      closeReview();
+      await onPick(null);
     } finally {
       setBusy(false);
     }
   };
 
-  // Restore last result + history
+  // restore lastResult + history
   useEffect(() => {
     const saved = localStorage.getItem(LAST_RESULT_KEY);
     if (saved) {
@@ -358,19 +357,17 @@ export default function Page() {
     }
   }, []);
 
-  // Load list on login
   useEffect(() => {
     if (session) loadReceipts();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session]);
 
-  // Refilter when history changes
   useEffect(() => {
     setItems((prev) => applyHistoryFilter(prev, historyClearedAt));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [historyClearedAt]);
 
-  // Close menu on outside click
+  // Menü schließen bei Klick außerhalb
   useEffect(() => {
     const onDocClick = (e: MouseEvent) => {
       if (!menuRef.current) return;
@@ -401,6 +398,7 @@ export default function Page() {
           <p style={styles.subtitleTop}>
             Belege fotografieren und automatisch in Drive + Excel speichern.
           </p>
+
           <div style={styles.loginCenter}>
             <button style={styles.primaryBtnLarge} onClick={() => signIn("google")}>
               Login
@@ -421,6 +419,7 @@ export default function Page() {
             <div style={styles.mutedSmall}>Angemeldet {session.user?.email}</div>
           </div>
 
+          {/* Menü */}
           <div style={{ position: "relative" }} ref={menuRef}>
             <button
               style={styles.menuBtn}
@@ -471,13 +470,7 @@ export default function Page() {
             )}
           </div>
 
-          {/* optional preview under input */}
-          {preview && (
-            <div style={{ marginTop: 12 }}>
-              <img src={preview} alt="preview" style={styles.previewImg} />
-            </div>
-          )}
-
+          {/* Debug */}
           {result && (
             <details style={{ marginTop: 12 }}>
               <summary style={styles.detailsSummary}>Letztes Ergebnis anzeigen</summary>
@@ -542,199 +535,242 @@ export default function Page() {
         </section>
       </div>
 
-      {/* ---------- Review Modal ---------- */}
+      {/* -------- Review Modal -------- */}
       {reviewOpen && (
         <div style={styles.modalOverlay} role="dialog" aria-modal="true">
           <div style={styles.modalCard}>
             <div style={styles.modalHeader}>
               <div>
-                <div style={{ fontWeight: 800, fontSize: 18 }}>Beleg prüfen</div>
-                <div style={styles.mutedSmall}>
-                  {reviewBusy ? "Analysiere…" : "Daten prüfen und ggf. korrigieren"}
-                </div>
+                <div style={styles.modalTitle}>Beleg prüfen</div>
+                <div style={styles.mutedSmall}>Daten prüfen und ggf. korrigieren</div>
               </div>
-
-              <button style={styles.modalClose} onClick={closeReview} disabled={reviewBusy || busy}>
+              <button
+                style={styles.modalClose}
+                onClick={() => setReviewOpen(false)}
+                aria-label="Schließen"
+              >
                 ✕
               </button>
             </div>
 
+            {/* Body scrollbar ✅ */}
             <div style={styles.modalBody}>
-              <div style={styles.modalGrid}>
-                <div style={styles.modalPreview}>
-                  {reviewImageUrl ? (
-                    <img src={reviewImageUrl} alt="preview" style={styles.modalImg} />
-                  ) : (
-                    <div style={styles.muted}>Kein Preview</div>
-                  )}
+              {/* Bild oben ✅ */}
+              {previewUrl && (
+                <div style={styles.modalImageWrap}>
+                  <img src={previewUrl} alt="preview" style={styles.modalImg} />
                 </div>
+              )}
 
-                <div style={styles.modalForm}>
-                  <label style={styles.label}>
-                    Datum (YYYY-MM-DD)
-                    <input
-                      style={styles.input}
-                      value={form.date}
-                      onChange={(e) => setForm((p) => ({ ...p, date: e.target.value }))}
-                      placeholder="2026-02-24"
-                      disabled={reviewBusy || busy}
-                    />
-                  </label>
+              {/* Form (deine Daten bleiben gleich) */}
+              <div style={styles.formGrid}>
+                <Field label="Datum (YYYY-MM-DD)">
+                  <input
+                    style={styles.input}
+                    value={reviewForm.date}
+                    onChange={(e) => setReviewForm((p) => ({ ...p, date: e.target.value }))}
+                    placeholder="2026-02-19"
+                  />
+                </Field>
 
-                  <label style={styles.label}>
-                    Händler / Vendor
-                    <input
-                      style={styles.input}
-                      value={form.vendor}
-                      onChange={(e) => setForm((p) => ({ ...p, vendor: e.target.value }))}
-                      placeholder="BILLA / OMV / ..."
-                      disabled={reviewBusy || busy}
-                    />
-                  </label>
+                <Field label="Uhrzeit (optional)">
+                  <input
+                    style={styles.input}
+                    value={reviewForm.time}
+                    onChange={(e) => setReviewForm((p) => ({ ...p, time: e.target.value }))}
+                    placeholder="17:45"
+                  />
+                </Field>
 
-                  <label style={styles.label}>
-                    Betrag
-                    <input
-                      style={styles.input}
-                      value={form.total}
-                      onChange={(e) => setForm((p) => ({ ...p, total: e.target.value }))}
-                      placeholder="13.97"
-                      inputMode="decimal"
-                      disabled={reviewBusy || busy}
-                    />
-                  </label>
+                <Field label="Händler / Vendor">
+                  <input
+                    style={styles.input}
+                    value={reviewForm.vendor}
+                    onChange={(e) => setReviewForm((p) => ({ ...p, vendor: e.target.value }))}
+                    placeholder="BILLA / OMV / ..."
+                  />
+                </Field>
 
-                  <label style={styles.label}>
-                    Währung
-                    <input
-                      style={styles.input}
-                      value={form.currency}
-                      onChange={(e) => setForm((p) => ({ ...p, currency: e.target.value }))}
-                      disabled={reviewBusy || busy}
-                    />
-                  </label>
+                <Field label="Betrag">
+                  <input
+                    style={styles.input}
+                    value={reviewForm.total}
+                    onChange={(e) => setReviewForm((p) => ({ ...p, total: e.target.value }))}
+                    placeholder="13.97"
+                    inputMode="decimal"
+                  />
+                </Field>
 
-                  <label style={styles.label}>
-                    Kategorie
+                <Field label="Währung">
+                  <input
+                    style={styles.input}
+                    value={reviewForm.currency}
+                    onChange={(e) => setReviewForm((p) => ({ ...p, currency: e.target.value }))}
+                    placeholder="EUR"
+                  />
+                </Field>
+
+                <Field label="Kategorie">
+                  <select
+                    style={styles.input}
+                    value={reviewForm.category}
+                    onChange={(e) => setReviewForm((p) => ({ ...p, category: e.target.value as Category }))}
+                  >
+                    <option value="KFZ">KFZ</option>
+                    <option value="MARKT">MARKT</option>
+                    <option value="BUERO">BUERO</option>
+                    <option value="RESTAURANT">RESTAURANT</option>
+                    <option value="SONSTIGES">SONSTIGES</option>
+                  </select>
+                </Field>
+
+                <Field label="Rechnungsnummer (optional)">
+                  <input
+                    style={styles.input}
+                    value={reviewForm.invoiceNumber}
+                    onChange={(e) => setReviewForm((p) => ({ ...p, invoiceNumber: e.target.value }))}
+                    placeholder="z.B. 012345"
+                  />
+                </Field>
+
+                <Field label="Firma (Intern/Extern)">
+                  <select
+                    style={styles.input}
+                    value={reviewForm.companyType}
+                    onChange={(e) =>
+                      setReviewForm((p) => ({
+                        ...p,
+                        companyType: e.target.value as "INTERN" | "EXTERN",
+                      }))
+                    }
+                  >
+                    <option value="EXTERN">EXTERN</option>
+                    <option value="INTERN">INTERN</option>
+                  </select>
+                </Field>
+
+                {reviewForm.companyType === "INTERN" && (
+                  <Field label="Interne Firma">
                     <select
                       style={styles.input}
-                      value={form.category}
-                      onChange={(e) => setForm((p) => ({ ...p, category: e.target.value as Category }))}
-                      disabled={reviewBusy || busy}
+                      value={reviewForm.internalCompany}
+                      onChange={(e) =>
+                        setReviewForm((p) => ({
+                          ...p,
+                          internalCompany: e.target.value as "RWD" | "DIEM" | "",
+                        }))
+                      }
                     >
-                      {CATEGORIES.map((c) => (
-                        <option key={c} value={c}>
-                          {c}
-                        </option>
-                      ))}
+                      <option value="">Bitte wählen…</option>
+                      <option value="RWD">RWD</option>
+                      <option value="DIEM">DIEM</option>
                     </select>
-                  </label>
+                  </Field>
+                )}
 
-                  <div style={{ ...styles.mutedSmall, marginTop: 8 }}>
-                    Confidence: {Math.round((form.confidence ?? 0) * 100)}%
-                  </div>
+                <div style={{ marginTop: 6, opacity: 0.8 }}>
+                  Confidence: {Math.round((reviewForm.confidence ?? 0) * 100)}%
                 </div>
               </div>
             </div>
 
             <div style={styles.modalFooter}>
-              <button style={styles.secondaryBtn} onClick={closeReview} disabled={busy || reviewBusy}>
+              <button
+                style={{ ...styles.secondaryBtn, opacity: busy ? 0.6 : 1 }}
+                onClick={() => setReviewOpen(false)}
+                disabled={busy}
+              >
                 Abbrechen
               </button>
 
               <button
-                style={{ ...styles.secondaryBtn, opacity: busy || reviewBusy ? 0.6 : 1 }}
+                style={{ ...styles.secondaryBtn, opacity: busy ? 0.6 : 1 }}
                 onClick={() => setCropOpen(true)}
-                disabled={busy || reviewBusy || !reviewImageUrl}
-                title="Beleg manuell zuschneiden"
+                disabled={busy || !previewUrl}
+                title="Bild manuell zuschneiden"
               >
                 Manuell zuschneiden
               </button>
 
               <button
-                style={{ ...styles.primaryBtn, opacity: busy || reviewBusy ? 0.6 : 1 }}
+                style={{ ...styles.primaryBtn, opacity: busy ? 0.6 : 1 }}
                 onClick={confirmAndUpload}
-                disabled={busy || reviewBusy}
+                disabled={busy}
               >
                 {busy ? "Upload…" : "Bestätigen & Upload"}
               </button>
             </div>
           </div>
+        </div>
+      )}
 
-          {/* ---- Crop Modal (on top of review) ---- */}
-          {cropOpen && reviewImageUrl && (
-            <div style={styles.cropOverlay} role="dialog" aria-modal="true">
-              <div style={styles.cropCard}>
-                <div style={styles.cropHeader}>
-                  <div style={{ fontWeight: 800 }}>Zuschneiden</div>
-                  <button
-                    style={styles.modalClose}
-                    onClick={() => setCropOpen(false)}
-                    disabled={reviewBusy}
-                    aria-label="Schließen"
-                  >
-                    ✕
-                  </button>
-                </div>
+      {/* -------- Crop Modal -------- */}
+      {cropOpen && previewUrl && (
+        <div style={styles.modalOverlay} role="dialog" aria-modal="true">
+          <div style={styles.cropCard}>
+            <div style={styles.modalHeader}>
+              <div>
+                <div style={styles.modalTitle}>Bild zuschneiden</div>
+                <div style={styles.mutedSmall}>Zieh/zoome bis der Beleg passt.</div>
+              </div>
+              <button style={styles.modalClose} onClick={() => setCropOpen(false)} aria-label="Schließen">
+                ✕
+              </button>
+            </div>
 
-                <div style={styles.cropBody}>
-                  <div style={styles.cropperWrap}>
-                    <Cropper
-                      image={reviewImageUrl}
-                      crop={crop}
-                      zoom={zoom}
-                      aspect={3 / 4} // typisch Beleg; wenn du "frei" willst: setz aspect={undefined} geht hier nicht, easy-crop braucht number
-                      onCropChange={setCrop}
-                      onZoomChange={setZoom}
-                      onCropComplete={onCropComplete}
-                      objectFit="contain"
-                    />
-                  </div>
+            <div style={styles.cropArea}>
+              <Cropper
+                image={previewUrl}
+                crop={crop}
+                zoom={zoom}
+                aspect={3 / 4} // Beleg-Format – kannst du ändern oder dynamisch machen
+                onCropChange={setCrop}
+                onZoomChange={setZoom}
+                onCropComplete={onCropComplete}
+              />
+            </div>
 
-                  <div style={styles.cropControls}>
-                    <div style={{ fontWeight: 700, marginBottom: 8 }}>Zoom</div>
-                    <input
-                      type="range"
-                      min={1}
-                      max={3}
-                      step={0.01}
-                      value={zoom}
-                      onChange={(e) => setZoom(Number(e.target.value))}
-                      style={{ width: "100%" }}
-                    />
-                    <div style={{ ...styles.mutedSmall, marginTop: 8 }}>
-                      Tipp: Rahmen ziehen/verschieben, dann „Übernehmen“.
-                    </div>
-                  </div>
-                </div>
+            <div style={styles.cropControls}>
+              <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
+                <span style={{ opacity: 0.8 }}>Zoom</span>
+                <input
+                  type="range"
+                  min={1}
+                  max={3}
+                  step={0.05}
+                  value={zoom}
+                  onChange={(e) => setZoom(Number(e.target.value))}
+                  style={{ width: 220 }}
+                />
+              </div>
 
-                <div style={styles.cropFooter}>
-                  <button
-                    style={styles.secondaryBtn}
-                    onClick={() => setCropOpen(false)}
-                    disabled={reviewBusy}
-                  >
-                    Abbrechen
-                  </button>
-                  <button
-                    style={{ ...styles.primaryBtn, opacity: reviewBusy ? 0.6 : 1 }}
-                    onClick={applyCrop}
-                    disabled={reviewBusy}
-                  >
-                    Übernehmen
-                  </button>
-                </div>
+              <div style={{ display: "flex", gap: 10 }}>
+                <button style={styles.secondaryBtn} onClick={() => setCropOpen(false)} disabled={busy}>
+                  Abbrechen
+                </button>
+                <button style={styles.primaryBtn} onClick={applyCrop} disabled={busy || !croppedAreaPixels}>
+                  {busy ? "…" : "Fertig"}
+                </button>
               </div>
             </div>
-          )}
+          </div>
         </div>
       )}
     </main>
   );
 }
 
-/* ---------------- Styles ---------------- */
+// kleines Field-Wrapper
+function Field({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div style={{ display: "grid", gap: 8 }}>
+      <div style={{ fontWeight: 700 }}>{label}</div>
+      {children}
+    </div>
+  );
+}
 
+/* ---------------- Styles ---------------- */
 const styles: Record<string, React.CSSProperties> = {
   page: {
     minHeight: "100dvh",
@@ -761,107 +797,6 @@ const styles: Record<string, React.CSSProperties> = {
     alignItems: "flex-start",
   },
   title: { margin: 0, fontSize: 34, letterSpacing: 0.2 },
-  sectionTitle: { margin: 0, fontSize: 18 },
-  sectionHeaderRow: {
-    display: "flex",
-    justifyContent: "space-between",
-    gap: 12,
-    alignItems: "center",
-    flexWrap: "wrap",
-  },
-  muted: { opacity: 0.8, margin: 0 },
-  mutedSmall: { opacity: 0.75, fontSize: 12, marginTop: 6 },
-  hr: { margin: "16px 0", border: "none", borderTop: "1px solid #2a2c31" },
-  uploadRow: { marginTop: 10, display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" },
-  fileInput: {
-    background: "#0d0e10",
-    border: "1px solid #2a2c31",
-    borderRadius: 10,
-    padding: 10,
-    color: "#f3f3f3",
-  },
-  primaryBtn: {
-    background: "#f3f3f3",
-    color: "#0b0b0c",
-    border: "none",
-    borderRadius: 10,
-    padding: "10px 14px",
-    cursor: "pointer",
-    fontWeight: 700,
-  },
-  secondaryBtn: {
-    background: "transparent",
-    color: "#f3f3f3",
-    border: "1px solid #2a2c31",
-    borderRadius: 10,
-    padding: "10px 14px",
-    cursor: "pointer",
-    fontWeight: 600,
-  },
-  linkBtn: {
-    color: "#f3f3f3",
-    textDecoration: "none",
-    border: "1px solid #2a2c31",
-    borderRadius: 10,
-    padding: "10px 14px",
-    display: "inline-block",
-  },
-  previewImg: { maxWidth: "100%", borderRadius: 12, border: "1px solid #2a2c31" },
-  codeBlock: {
-    marginTop: 10,
-    background: "#0b0b0c",
-    color: "#45ff6a",
-    padding: 12,
-    borderRadius: 12,
-    overflow: "auto",
-    border: "1px solid #26282c",
-    maxHeight: 360,
-  },
-  detailsSummary: { cursor: "pointer", opacity: 0.9 },
-  listItem: {
-    border: "1px solid #26282c",
-    borderRadius: 12,
-    padding: 12,
-    display: "flex",
-    justifyContent: "space-between",
-    alignItems: "center",
-    gap: 12,
-    background: "#0f1012",
-  },
-  itemTitle: { fontWeight: 700, wordBreak: "break-word" },
-  itemMeta: { fontSize: 12, opacity: 0.7, marginTop: 4 },
-  menuBtn: {
-    background: "transparent",
-    color: "#f3f3f3",
-    border: "1px solid #2a2c31",
-    borderRadius: 10,
-    padding: "8px 10px",
-    cursor: "pointer",
-    fontSize: 18,
-    lineHeight: 1,
-  },
-  menuDropdown: {
-    position: "absolute",
-    top: 42,
-    right: 0,
-    minWidth: 180,
-    background: "#0f1012",
-    border: "1px solid #26282c",
-    borderRadius: 12,
-    overflow: "hidden",
-    boxShadow: "0 12px 30px rgba(0,0,0,0.4)",
-    zIndex: 10,
-  },
-  menuItem: {
-    width: "100%",
-    textAlign: "left",
-    background: "transparent",
-    color: "#f3f3f3",
-    border: "none",
-    padding: "12px 12px",
-    cursor: "pointer",
-    fontWeight: 700,
-  },
   titleTop: { margin: 0, fontSize: 36, textAlign: "center" },
   subtitleTop: { opacity: 0.8, marginTop: 8, textAlign: "center" },
   loginCenter: { position: "absolute", top: "50%", left: "50%", transform: "translate(-50%, -50%)" },
@@ -876,147 +811,129 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: 18,
     boxShadow: "0 8px 30px rgba(0,0,0,0.4)",
   },
+  sectionTitle: { margin: 0, fontSize: 18 },
+  sectionHeaderRow: { display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center", flexWrap: "wrap" },
+  muted: { opacity: 0.8, margin: 0 },
+  mutedSmall: { opacity: 0.75, fontSize: 12, marginTop: 6 },
+  hr: { margin: "16px 0", border: "none", borderTop: "1px solid #2a2c31" },
+  uploadRow: { marginTop: 10, display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" },
+  fileInput: { background: "#0d0e10", border: "1px solid #2a2c31", borderRadius: 10, padding: 10, color: "#f3f3f3" },
+  primaryBtn: { background: "#f3f3f3", color: "#0b0b0c", border: "none", borderRadius: 10, padding: "10px 14px", cursor: "pointer", fontWeight: 700 },
+  secondaryBtn: { background: "transparent", color: "#f3f3f3", border: "1px solid #2a2c31", borderRadius: 10, padding: "10px 14px", cursor: "pointer", fontWeight: 600 },
+  linkBtn: { color: "#f3f3f3", textDecoration: "none", border: "1px solid #2a2c31", borderRadius: 10, padding: "10px 14px", display: "inline-block" },
+  codeBlock: { marginTop: 10, background: "#0b0b0c", color: "#45ff6a", padding: 12, borderRadius: 12, overflow: "auto", border: "1px solid #26282c", maxHeight: 360 },
+  detailsSummary: { cursor: "pointer", opacity: 0.9 },
+  listItem: { border: "1px solid #26282c", borderRadius: 12, padding: 12, display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, background: "#0f1012" },
+  itemTitle: { fontWeight: 700, wordBreak: "break-word" },
+  itemMeta: { fontSize: 12, opacity: 0.7, marginTop: 4 },
+  menuBtn: { background: "transparent", color: "#f3f3f3", border: "1px solid #2a2c31", borderRadius: 10, padding: "8px 10px", cursor: "pointer", fontSize: 18, lineHeight: 1 },
+  menuDropdown: { position: "absolute", top: 42, right: 0, minWidth: 180, background: "#0f1012", border: "1px solid #26282c", borderRadius: 12, overflow: "hidden", boxShadow: "0 12px 30px rgba(0,0,0,0.4)", zIndex: 10 },
+  menuItem: { width: "100%", textAlign: "left", background: "transparent", color: "#f3f3f3", border: "none", padding: "12px 12px", cursor: "pointer", fontWeight: 700 },
 
-  // Review modal
+  // Modal
   modalOverlay: {
     position: "fixed",
     inset: 0,
     background: "rgba(0,0,0,0.65)",
     display: "flex",
     justifyContent: "center",
-    alignItems: "flex-start",
-    padding: 16,
+    alignItems: "center",
+    padding: 14,
     zIndex: 50,
-    overflowY: "auto",
   },
   modalCard: {
-    width: "100%",
-    maxWidth: 920,
+    width: "min(980px, 100%)",
+    maxHeight: "92dvh",
     background: "#111214",
     border: "1px solid #26282c",
-    borderRadius: 16,
-    boxShadow: "0 20px 60px rgba(0,0,0,0.5)",
+    borderRadius: 18,
+    boxShadow: "0 18px 60px rgba(0,0,0,0.55)",
     overflow: "hidden",
+    display: "flex",
+    flexDirection: "column",
   },
   modalHeader: {
-    padding: 14,
-    borderBottom: "1px solid #2a2c31",
     display: "flex",
     justifyContent: "space-between",
     alignItems: "flex-start",
     gap: 12,
+    padding: 16,
+    borderBottom: "1px solid #2a2c31",
   },
+  modalTitle: { fontSize: 24, fontWeight: 800 },
   modalClose: {
     background: "transparent",
     color: "#f3f3f3",
     border: "1px solid #2a2c31",
-    borderRadius: 10,
-    padding: "6px 10px",
-    cursor: "pointer",
-    fontWeight: 800,
-  },
-  modalBody: { padding: 14 },
-  modalGrid: { display: "grid", gridTemplateColumns: "1fr", gap: 14 },
-  modalPreview: {
-    border: "1px solid #26282c",
     borderRadius: 12,
-    background: "#0f1012",
-    padding: 10,
+    padding: "8px 10px",
+    cursor: "pointer",
+    fontSize: 16,
+  },
+  modalBody: {
+    padding: 16,
+    overflow: "auto", // ✅ scroll
+    display: "grid",
+    gap: 14,
+  },
+  modalImageWrap: {
+    border: "1px solid #26282c",
+    borderRadius: 14,
+    overflow: "hidden",
+    background: "#0b0b0c",
   },
   modalImg: {
     width: "100%",
     height: "auto",
-    borderRadius: 10,
-    border: "1px solid #2a2c31",
     display: "block",
   },
-  modalForm: {
-    border: "1px solid #26282c",
-    borderRadius: 12,
-    background: "#0f1012",
-    padding: 12,
+  formGrid: {
     display: "grid",
-    gap: 10,
-  },
-  label: {
-    display: "grid",
-    gap: 6,
-    fontSize: 12,
-    opacity: 0.9,
-    fontWeight: 700,
+    gap: 14,
   },
   input: {
-    background: "#0b0b0c",
+    width: "100%",
+    background: "#0d0e10",
     border: "1px solid #2a2c31",
-    borderRadius: 10,
-    padding: "10px 12px",
+    borderRadius: 12,
+    padding: "12px 12px",
     color: "#f3f3f3",
     outline: "none",
-    width: "100%",
   },
   modalFooter: {
-    padding: 14,
-    borderTop: "1px solid #2a2c31",
     display: "flex",
     justifyContent: "flex-end",
     gap: 10,
+    padding: 16,
+    borderTop: "1px solid #2a2c31",
     flexWrap: "wrap",
   },
 
   // Crop modal
-  cropOverlay: {
-    position: "fixed",
-    inset: 0,
-    background: "rgba(0,0,0,0.75)",
-    display: "flex",
-    justifyContent: "center",
-    alignItems: "center",
-    padding: 16,
-    zIndex: 80,
-  },
   cropCard: {
-    width: "100%",
-    maxWidth: 920,
+    width: "min(980px, 100%)",
+    maxHeight: "92dvh",
     background: "#111214",
     border: "1px solid #26282c",
-    borderRadius: 16,
+    borderRadius: 18,
     overflow: "hidden",
-    boxShadow: "0 20px 60px rgba(0,0,0,0.6)",
-  },
-  cropHeader: {
-    padding: 12,
-    borderBottom: "1px solid #2a2c31",
     display: "flex",
-    justifyContent: "space-between",
-    alignItems: "center",
+    flexDirection: "column",
+    boxShadow: "0 18px 60px rgba(0,0,0,0.55)",
   },
-  cropBody: {
-    display: "grid",
-    gridTemplateColumns: "1fr",
-    gap: 12,
-    padding: 12,
-  },
-  cropperWrap: {
+  cropArea: {
     position: "relative",
     width: "100%",
-    height: "50vh",
-    minHeight: 280,
+    height: "60dvh",
     background: "#0b0b0c",
-    borderRadius: 12,
-    border: "1px solid #26282c",
-    overflow: "hidden",
   },
   cropControls: {
-    border: "1px solid #26282c",
-    borderRadius: 12,
-    background: "#0f1012",
-    padding: 12,
-  },
-  cropFooter: {
-    padding: 12,
+    padding: 16,
     borderTop: "1px solid #2a2c31",
     display: "flex",
-    justifyContent: "flex-end",
-    gap: 10,
+    justifyContent: "space-between",
+    gap: 12,
+    alignItems: "center",
+    flexWrap: "wrap",
   },
 };
