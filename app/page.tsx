@@ -24,6 +24,7 @@ type ReviewForm = {
   invoiceNumber: string;
   companyType: "INTERN" | "EXTERN";
   internalCompany: "RWD" | "DIEM" | "";
+  comment: string;
   confidence: number; // 0..1
 };
 
@@ -116,6 +117,7 @@ export default function Page() {
     invoiceNumber: "",
     companyType: "EXTERN",
     internalCompany: "",
+    comment: "",
     confidence: 0,
   });
 
@@ -227,6 +229,7 @@ export default function Page() {
       invoiceNumber: "",
       companyType: "EXTERN",
       internalCompany: "",
+      comment: "",
       confidence: 0,
     });
 
@@ -306,6 +309,7 @@ export default function Page() {
         invoiceNumber: reviewForm.invoiceNumber || null,
         companyType: reviewForm.companyType,
         internalCompany: reviewForm.internalCompany || null,
+        comment: reviewForm.comment || null,
         confidence: reviewForm.confidence ?? 0,
       };
 
@@ -721,6 +725,24 @@ export default function Page() {
                     </select>
                   </Field>
                 )}
+
+                <Field label="Kommentar / Beschreibung (optional)">
+  <textarea
+    style={{
+      ...styles.input,
+      minHeight: 80,
+      resize: "vertical",
+    }}
+    value={reviewForm.comment}
+    onChange={(e) =>
+      setReviewForm((p) => ({
+        ...p,
+        comment: e.target.value,
+      }))
+    }
+    placeholder="z.B. Projekt ABC, Kundentermin, Materialkosten..."
+  />
+</Field>
 
                 <div style={{ marginTop: 6, opacity: 0.8 }}>
                   Confidence: {Math.round((reviewForm.confidence ?? 0) * 100)}%
