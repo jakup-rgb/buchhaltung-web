@@ -3,18 +3,19 @@ import { Readable } from "stream";
 
 type RowData = {
   date: string | null;
-  time?: string | null;              // NEU
-  invoiceNumber?: string | null;     // NEU
+  time?: string | null;              
+  invoiceNumber?: string | null;     
   vendor: string | null;
-  companyType?: "INTERN" | "EXTERN"; // NEU
-  internalCompany?: string | null;   // NEU
+  companyType?: "INTERN" | "EXTERN"; 
+  internalCompany?: string | null;   
   total: number | null;
   currency: string | null;
   category: string;
   pdfName: string;
   pdfWebViewLink: string | null;
-  pdfFileId: string | null;
-  confidence: number;
+  comment?: string | null;          
+ // pdfFileId: string | null;
+ // confidence: number;
 };
 
 async function findFile(drive: any, name: string, parentId?: string) {
@@ -54,8 +55,9 @@ function ensureHeader(ws: ExcelJS.Worksheet) {
     "Kategorie",
     "PDF Name",
     "PDF Link",
-    "PDF File ID",
-    "Confidence",
+    "comment",
+   // "PDF File ID",
+   // "Confidence",
   ];
 
   const r1 = ws.getRow(1);
@@ -143,9 +145,10 @@ r.getCell(8).value = row.currency ?? "";                // Währung
 r.getCell(9).value = row.category ?? "";                // Kategorie
 r.getCell(10).value = row.pdfName ?? "";                // PDF Name
 r.getCell(11).value = row.pdfWebViewLink ?? "";         // PDF Link
-r.getCell(12).value = row.pdfFileId ?? "";              // File ID
-r.getCell(13).value =
-  typeof row.confidence === "number" ? row.confidence : 0; // Confidence
+r.getCell(12).value = row.comment ?? "";              // Comment
+// r.getCell(12).value = row.pdfFileId ?? "";              // File ID
+// r.getCell(13).value =
+//  typeof row.confidence === "number" ? row.confidence : 0; // Confidence
 
 r.commit?.();
 

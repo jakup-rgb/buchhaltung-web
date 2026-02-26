@@ -178,8 +178,9 @@ try {
       category,
       pdfName: fileName,
       pdfWebViewLink: uploaded.data.webViewLink ?? null,
-      pdfFileId: uploaded.data.id ?? null,
-      confidence: typeof final?.confidence === "number" ? final.confidence : 0, // ✅ sauber
+      comment: final?.comment ?? "",
+     // pdfFileId: uploaded.data.id ?? null,
+     // confidence: typeof final?.confidence === "number" ? final.confidence : 0, // ✅ sauber
     },
   });
 } catch (e: any) {
