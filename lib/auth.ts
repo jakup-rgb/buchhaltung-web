@@ -55,9 +55,10 @@ export const authOptions: NextAuthOptions = {
       // Erstes Login
       if (account) {
         return {
+          ...token,
           accessToken: account.access_token,
           accessTokenExpires: (account.expires_at ?? 0) * 1000, // ms
-          refreshToken: account.refresh_token, // kommt meist nur beim ersten consent
+          refreshToken: account.refresh_token ?? (token as any).refreshToken, // manchmal kommt kein refresh_token zurück, dann alten behalten
           user: token.user,
         };
       }
