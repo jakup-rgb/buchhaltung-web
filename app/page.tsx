@@ -98,6 +98,10 @@ export default function Page() {
   const [menuOpen, setMenuOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement | null>(null);
 
+  // ---- Upload & Review State ----
+  const cameraInputRef = useRef<HTMLInputElement | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+
   const [historyClearedAt, setHistoryClearedAt] = useState<number>(0);
 
   // ---- Datei & Preview ----
@@ -339,7 +343,7 @@ export default function Page() {
       } catch (e) {
         console.error("LOAD_RECEIPTS_ERROR", e);
       }
-      
+
       await onPick(null);
     } finally {
       setBusy(false);
@@ -458,22 +462,56 @@ export default function Page() {
           <h2 style={styles.sectionTitle}>Neuen Beleg hochladen</h2>
           <p style={{ ...styles.muted, marginTop: 6 }}>Am iPhone öffnet das die Kamera.</p>
 
-          <div style={styles.uploadRow}>
-            <input
-              type="file"
-              accept="image/*"
-              capture="environment"
-              onChange={(e) => onPick(e.target.files?.[0] ?? null)}
-              disabled={busy}
-              style={styles.fileInput}
-            />
+<div style={styles.uploadRow}>
+  {/* Hidden: Kamera */}
+  <input
+    ref={cameraInputRef}
+    type="file"
+    accept="image/*"
+    capture="environment"
+    onChange={(e) => {
+      onPick(e.target.files?.[0] ?? null); 
+      e.currentTarget.value = "";
+    }}
+    disabled={busy}
+    style={{ display: "none" }}
+  />
 
-            {excelLink && (
-              <a style={styles.linkBtn} href={excelLink} target="_blank" rel="noreferrer">
-                Excel öffnen
-              </a>
-            )}
-          </div>
+  {/* Hidden: Dateien/Fotos auswählen */}
+  <input
+    ref={fileInputRef}
+    type="file"
+    accept="image/*"
+    onChange={(e) => {
+      onPick(e.target.files?.[0] ?? null);
+      e.currentTarget.value = "";
+    }}
+    disabled={busy}
+    style={{ display: "none" }}
+  />
+
+  <button
+    style={{ ...styles.primaryBtn, opacity: busy ? 0.6 : 1 }}
+    onClick={() => cameraInputRef.current?.click()}
+    disabled={busy}
+  >
+    Foto machen
+  </button>
+
+  <button
+    style={{ ...styles.secondaryBtn, opacity: busy ? 0.6 : 1 }}
+    onClick={() => fileInputRef.current?.click()}
+    disabled={busy}
+  >
+    Aus Fotos/Dateien wählen
+  </button>
+
+  {excelLink && (
+    <a style={styles.linkBtn} href={excelLink} target="_blank" rel="noreferrer">
+      Excel öffnen
+    </a>
+  )}
+</div>
 
           {result && (
             <details style={{ marginTop: 12 }}>
