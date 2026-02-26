@@ -334,7 +334,12 @@ export default function Page() {
       localStorage.setItem(LAST_RESULT_KEY, JSON.stringify(data));
 
       closeReview();
+      try {
       await loadReceipts();
+      } catch (e) {
+        console.error("LOAD_RECEIPTS_ERROR", e);
+      }
+      
       await onPick(null);
     } finally {
       setBusy(false);
