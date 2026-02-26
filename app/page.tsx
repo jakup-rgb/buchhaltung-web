@@ -2,7 +2,8 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { signIn, signOut, useSession } from "next-auth/react";
-import Cropper from "react-easy-crop";
+import ReactCrop, { type Crop, type PixelCrop } from "react-image-crop";
+import "react-image-crop/dist/ReactCrop.css";
 
 type ReceiptItem = {
   id: string;
@@ -34,34 +35,45 @@ function clampStr(v: any) {
   return typeof v === "string" ? v : v == null ? "" : String(v);
 }
 
-async function createCroppedBlob(imageUrl: string, cropPixels: any): Promise<Blob> {
-  const img = new Image();
-  img.crossOrigin = "anonymous";
-  img.src = imageUrl;
+function centerCropPercent(imageWidth: number, imageHeight: number): Crop {
+  // Start-Crop: großer Bereich mittig (in %), user kann dann Handles ziehen
+  const w = 92;
+  const h = 92;
+  return {
+    unit: "%",
+    x: (100 - w) / 2,
+    y: (100 - h) / 2,
+    width: w,
+    height: h,
+  };
+}
 
-  await new Promise<void>((resolve, reject) => {
-    img.onload = () => resolve();
-    img.onerror = () => reject(new Error("Image load failed"));
-  });
-
+async function createCroppedBlobFromImageElement(
+  image: HTMLImageElement,
+  crop: PixelCrop
+): Promise<Blob> {
   const canvas = document.createElement("canvas");
-  canvas.width = Math.max(1, Math.floor(cropPixels.width));
-  canvas.height = Math.max(1, Math.floor(cropPixels.height));
+
+  const scaleX = image.naturalWidth / image.width;
+  const scaleY = image.naturalHeight / image.height;
+
+  const pixelRatio = window.devicePixelRatio || 1;
+
+  canvas.width = Math.max(1, Math.floor(crop.width * scaleX * pixelRatio));
+  canvas.height = Math.max(1, Math.floor(crop.height * scaleY * pixelRatio));
 
   const ctx = canvas.getContext("2d");
   if (!ctx) throw new Error("No canvas context");
 
-  ctx.drawImage(
-    img,
-    cropPixels.x,
-    cropPixels.y,
-    cropPixels.width,
-    cropPixels.height,
-    0,
-    0,
-    canvas.width,
-    canvas.height
-  );
+  ctx.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
+  ctx.imageSmoothingQuality = "high";
+
+  const sx = crop.x * scaleX;
+  const sy = crop.y * scaleY;
+  const sw = crop.width * scaleX;
+  const sh = crop.height * scaleY;
+
+  ctx.drawImage(image, sx, sy, sw, sh, 0, 0, crop.width * scaleX, crop.height * scaleY);
 
   return await new Promise<Blob>((resolve, reject) => {
     canvas.toBlob(
@@ -107,11 +119,11 @@ export default function Page() {
     confidence: 0,
   });
 
-  // ---- Crop Mode ----
+  // ---- Crop (handles) ----
   const [cropOpen, setCropOpen] = useState(false);
-  const [crop, setCrop] = useState({ x: 0, y: 0 });
-  const [zoom, setZoom] = useState(1);
-  const [croppedAreaPixels, setCroppedAreaPixels] = useState<any>(null);
+  const imgRef = useRef<HTMLImageElement | null>(null);
+  const [crop, setCrop] = useState<Crop>({ unit: "%", x: 4, y: 4, width: 92, height: 92 });
+  const [completedCrop, setCompletedCrop] = useState<PixelCrop | null>(null);
 
   const excelLink = useMemo(() => result?.excel?.webViewLink ?? null, [result]);
 
@@ -198,16 +210,14 @@ export default function Page() {
 
   // ---- Datei gewählt -> Preview + Extract + Modal ----
   const openReviewForFile = async (f: File) => {
-    // cleanup alte URL
     if (previewUrl) URL.revokeObjectURL(previewUrl);
 
     const url = URL.createObjectURL(f);
     setPreviewUrl(url);
     setFile(f);
 
-    // form reset (optional)
-    setReviewForm((p) => ({
-      ...p,
+    // Reset Form
+    setReviewForm({
       date: "",
       time: "",
       vendor: "",
@@ -218,12 +228,16 @@ export default function Page() {
       companyType: "EXTERN",
       internalCompany: "",
       confidence: 0,
-    }));
+    });
 
     setReviewOpen(true);
     setCropOpen(false);
 
-    // Extraktion starten
+    // Crop default
+    // wird nach img onLoad nochmal zentriert
+    setCrop({ unit: "%", x: 4, y: 4, width: 92, height: 92 });
+    setCompletedCrop(null);
+
     await runExtract(f);
   };
 
@@ -243,18 +257,18 @@ export default function Page() {
 
   // ---- Crop anwenden ----
   const applyCrop = async () => {
-    if (!file || !previewUrl || !croppedAreaPixels) return;
+    if (!file || !imgRef.current || !completedCrop) return;
 
     setReviewBusy(true);
     try {
-      const croppedBlob = await createCroppedBlob(previewUrl, croppedAreaPixels);
+      const croppedBlob = await createCroppedBlobFromImageElement(imgRef.current, completedCrop);
+
       const croppedFile = new File(
         [croppedBlob],
         file.name.replace(/\.\w+$/, "") + "_crop.jpg",
         { type: "image/jpeg" }
       );
 
-      // preview + file ersetzen
       if (previewUrl) URL.revokeObjectURL(previewUrl);
       const newUrl = URL.createObjectURL(croppedFile);
 
@@ -263,7 +277,7 @@ export default function Page() {
 
       setCropOpen(false);
 
-      // Optional: nach Crop nochmal extrahieren (bessere Werte)
+      // nach Crop nochmal extrahieren
       await runExtract(croppedFile);
     } finally {
       setReviewBusy(false);
@@ -548,44 +562,56 @@ export default function Page() {
                 )}
               </div>
 
-              {/* Crop UI */}
+              {/* Crop UI (mit Handles) */}
               {cropOpen && previewUrl && (
                 <div style={styles.cropWrap}>
+                  <div style={styles.cropTopRow}>
+                    <div style={{ fontWeight: 800 }}>Zuschneiden</div>
+                    <button
+                      style={styles.secondaryBtn}
+                      onClick={() => setCropOpen(false)}
+                      disabled={reviewBusy || busy}
+                    >
+                      Schließen
+                    </button>
+                  </div>
+
                   <div style={styles.cropArea}>
-                    <Cropper
-                      image={previewUrl}
+                    <ReactCrop
                       crop={crop}
-                      zoom={zoom}
-                      onCropChange={setCrop}
-                      onZoomChange={setZoom}
-                      onCropComplete={(_, pixels) => setCroppedAreaPixels(pixels)}
-                      aspect={3 / 4}
-                      restrictPosition={false}
-                    />
+                      onChange={(_, p) => setCrop(p)}
+                      onComplete={(c) => setCompletedCrop(c)}
+                      keepSelection
+                      ruleOfThirds
+                    >
+                      <img
+                        ref={imgRef}
+                        src={previewUrl}
+                        alt="crop"
+                        style={{ maxHeight: 520, width: "100%", objectFit: "contain", display: "block" }}
+                        onLoad={(e) => {
+                          const img = e.currentTarget;
+                          setCrop(centerCropPercent(img.width, img.height));
+                        }}
+                      />
+                    </ReactCrop>
                   </div>
 
                   <div style={styles.cropControls}>
-                    <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
-                      <span style={{ fontSize: 12, opacity: 0.8 }}>Zoom</span>
-                      <input
-                        type="range"
-                        min={1}
-                        max={3}
-                        step={0.01}
-                        value={zoom}
-                        onChange={(e) => setZoom(Number(e.target.value))}
-                        style={{ width: 180 }}
-                      />
-                    </div>
-
-                    <div style={{ display: "flex", gap: 10 }}>
-                      <button style={styles.secondaryBtn} onClick={() => setCropOpen(false)} disabled={reviewBusy || busy}>
-                        Abbrechen
-                      </button>
-                      <button style={styles.primaryBtn} onClick={applyCrop} disabled={reviewBusy || busy}>
-                        Zuschneiden übernehmen
-                      </button>
-                    </div>
+                    <button
+                      style={styles.secondaryBtn}
+                      onClick={() => setCropOpen(false)}
+                      disabled={reviewBusy || busy}
+                    >
+                      Abbrechen
+                    </button>
+                    <button
+                      style={styles.primaryBtn}
+                      onClick={applyCrop}
+                      disabled={reviewBusy || busy || !completedCrop || completedCrop.width < 5 || completedCrop.height < 5}
+                    >
+                      Zuschneiden übernehmen
+                    </button>
                   </div>
                 </div>
               )}
@@ -700,7 +726,6 @@ export default function Page() {
                   Confidence: {Math.round((reviewForm.confidence ?? 0) * 100)}%
                 </div>
 
-                {/* optional: Button statt Klick */}
                 <div style={{ marginTop: 10 }}>
                   <button
                     style={styles.secondaryBtn}
@@ -973,16 +998,22 @@ const styles: Record<string, React.CSSProperties> = {
     overflow: "hidden",
     background: "#0f1012",
   },
+  cropTopRow: {
+    padding: 10,
+    borderBottom: "1px solid #26282c",
+    display: "flex",
+    justifyContent: "space-between",
+    alignItems: "center",
+    gap: 10,
+  },
   cropArea: {
-    position: "relative",
-    width: "100%",
-    height: 320,
+    padding: 10,
   },
   cropControls: {
     padding: 10,
     borderTop: "1px solid #26282c",
     display: "flex",
-    justifyContent: "space-between",
+    justifyContent: "flex-end",
     gap: 10,
     alignItems: "center",
     flexWrap: "wrap",
