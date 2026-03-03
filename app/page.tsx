@@ -49,40 +49,59 @@ function centerCropPercent(imageWidth: number, imageHeight: number): Crop {
   };
 }
 
+/**
+ * ✅ Safari-stabiler Crop:
+ * - nutzt naturalWidth/naturalHeight
+ * - KEIN devicePixelRatio / setTransform (macht auf manchen Geräten leere/komische Ergebnisse)
+ * - prüft Maße
+ */
 async function createCroppedBlobFromImageElement(
   image: HTMLImageElement,
   crop: PixelCrop
 ): Promise<Blob> {
+  if (!crop || crop.width <= 0 || crop.height <= 0) {
+    throw new Error("Invalid crop size");
+  }
+
+  const naturalW = image.naturalWidth || image.width;
+  const naturalH = image.naturalHeight || image.height;
+
+  const renderedW = image.width || naturalW;
+  const renderedH = image.height || naturalH;
+
+  const scaleX = naturalW / renderedW;
+  const scaleY = naturalH / renderedH;
+
+  const sx = Math.max(0, Math.floor(crop.x * scaleX));
+  const sy = Math.max(0, Math.floor(crop.y * scaleY));
+  const sw = Math.max(1, Math.floor(crop.width * scaleX));
+  const sh = Math.max(1, Math.floor(crop.height * scaleY));
+
   const canvas = document.createElement("canvas");
-
-  const scaleX = image.naturalWidth / image.width;
-  const scaleY = image.naturalHeight / image.height;
-
-  const pixelRatio = window.devicePixelRatio || 1;
-
-  canvas.width = Math.max(1, Math.floor(crop.width * scaleX * pixelRatio));
-  canvas.height = Math.max(1, Math.floor(crop.height * scaleY * pixelRatio));
+  canvas.width = sw;
+  canvas.height = sh;
 
   const ctx = canvas.getContext("2d");
   if (!ctx) throw new Error("No canvas context");
 
-  ctx.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
+  ctx.imageSmoothingEnabled = true;
   ctx.imageSmoothingQuality = "high";
 
-  const sx = crop.x * scaleX;
-  const sy = crop.y * scaleY;
-  const sw = crop.width * scaleX;
-  const sh = crop.height * scaleY;
+  ctx.drawImage(image, sx, sy, sw, sh, 0, 0, sw, sh);
 
-  ctx.drawImage(image, sx, sy, sw, sh, 0, 0, crop.width * scaleX, crop.height * scaleY);
-
-  return await new Promise<Blob>((resolve, reject) => {
+  const blob = await new Promise<Blob>((resolve, reject) => {
     canvas.toBlob(
       (b) => (b ? resolve(b) : reject(new Error("toBlob failed"))),
       "image/jpeg",
       0.95
     );
   });
+
+  if (!blob || blob.size === 0) {
+    throw new Error("Cropped blob is empty");
+  }
+
+  return blob;
 }
 
 export default function Page() {
@@ -241,7 +260,6 @@ export default function Page() {
     setCropOpen(false);
 
     // Crop default
-    // wird nach img onLoad nochmal zentriert
     setCrop({ unit: "%", x: 4, y: 4, width: 92, height: 92 });
     setCompletedCrop(null);
 
@@ -264,7 +282,19 @@ export default function Page() {
 
   // ---- Crop anwenden ----
   const applyCrop = async () => {
-    if (!file || !imgRef.current || !completedCrop) return;
+    // ✅ wichtiger: completedCrop kann "komisch" sein, also hart prüfen
+    if (!file) {
+      setResult({ error: true, message: "Kein File zum Zuschneiden." });
+      return;
+    }
+    if (!imgRef.current) {
+      setResult({ error: true, message: "Bild nicht geladen (imgRef)." });
+      return;
+    }
+    if (!completedCrop || completedCrop.width < 5 || completedCrop.height < 5) {
+      setResult({ error: true, message: "Crop zu klein oder nicht gesetzt." });
+      return;
+    }
 
     setReviewBusy(true);
     try {
@@ -276,6 +306,11 @@ export default function Page() {
         { type: "image/jpeg" }
       );
 
+      if (croppedFile.size === 0) {
+        throw new Error("Cropped file is empty (0 bytes)");
+      }
+
+      // Preview URL ersetzen
       if (previewUrl) URL.revokeObjectURL(previewUrl);
       const newUrl = URL.createObjectURL(croppedFile);
 
@@ -286,6 +321,9 @@ export default function Page() {
 
       // nach Crop nochmal extrahieren
       await runExtract(croppedFile);
+    } catch (e: any) {
+      console.error("CROP_ERROR", e);
+      setResult({ error: true, message: "Crop fehlgeschlagen", details: e?.message ?? String(e) });
     } finally {
       setReviewBusy(false);
     }
@@ -319,7 +357,14 @@ export default function Page() {
 
       fd.append("overrides", JSON.stringify(overrides));
 
-      const res = await fetch("/api/upload", { method: "POST", body: fd });
+      let res: Response;
+      try {
+        res = await fetch("/api/upload", { method: "POST", body: fd });
+      } catch (e: any) {
+        setResult({ error: true, message: "Netzwerkfehler beim Upload", details: e?.message ?? String(e) });
+        return;
+      }
+
       const text = await res.text();
 
       let data: any;
@@ -339,7 +384,7 @@ export default function Page() {
 
       closeReview();
       try {
-      await loadReceipts();
+        await loadReceipts();
       } catch (e) {
         console.error("LOAD_RECEIPTS_ERROR", e);
       }
@@ -462,56 +507,56 @@ export default function Page() {
           <h2 style={styles.sectionTitle}>Neuen Beleg hochladen</h2>
           <p style={{ ...styles.muted, marginTop: 6 }}>Am iPhone öffnet das die Kamera.</p>
 
-<div style={styles.uploadRow}>
-  {/* Hidden: Kamera */}
-  <input
-    ref={cameraInputRef}
-    type="file"
-    accept="image/*"
-    capture="environment"
-    onChange={(e) => {
-      onPick(e.target.files?.[0] ?? null); 
-      e.currentTarget.value = "";
-    }}
-    disabled={busy}
-    style={{ display: "none" }}
-  />
+          <div style={styles.uploadRow}>
+            {/* Hidden: Kamera */}
+            <input
+              ref={cameraInputRef}
+              type="file"
+              accept="image/*"
+              capture="environment"
+              onChange={(e) => {
+                onPick(e.target.files?.[0] ?? null);
+                e.currentTarget.value = "";
+              }}
+              disabled={busy}
+              style={{ display: "none" }}
+            />
 
-  {/* Hidden: Dateien/Fotos auswählen */}
-  <input
-    ref={fileInputRef}
-    type="file"
-    accept="image/*"
-    onChange={(e) => {
-      onPick(e.target.files?.[0] ?? null);
-      e.currentTarget.value = "";
-    }}
-    disabled={busy}
-    style={{ display: "none" }}
-  />
+            {/* Hidden: Dateien/Fotos auswählen */}
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept="image/*"
+              onChange={(e) => {
+                onPick(e.target.files?.[0] ?? null);
+                e.currentTarget.value = "";
+              }}
+              disabled={busy}
+              style={{ display: "none" }}
+            />
 
-  <button
-    style={{ ...styles.primaryBtn, opacity: busy ? 0.6 : 1 }}
-    onClick={() => cameraInputRef.current?.click()}
-    disabled={busy}
-  >
-    Foto machen
-  </button>
+            <button
+              style={{ ...styles.primaryBtn, opacity: busy ? 0.6 : 1 }}
+              onClick={() => cameraInputRef.current?.click()}
+              disabled={busy}
+            >
+              Foto machen
+            </button>
 
-  <button
-    style={{ ...styles.secondaryBtn, opacity: busy ? 0.6 : 1 }}
-    onClick={() => fileInputRef.current?.click()}
-    disabled={busy}
-  >
-    Aus Fotos/Dateien wählen
-  </button>
+            <button
+              style={{ ...styles.secondaryBtn, opacity: busy ? 0.6 : 1 }}
+              onClick={() => fileInputRef.current?.click()}
+              disabled={busy}
+            >
+              Aus Fotos/Dateien wählen
+            </button>
 
-  {excelLink && (
-    <a style={styles.linkBtn} href={excelLink} target="_blank" rel="noreferrer">
-      Excel öffnen
-    </a>
-  )}
-</div>
+            {excelLink && (
+              <a style={styles.linkBtn} href={excelLink} target="_blank" rel="noreferrer">
+                Excel öffnen
+              </a>
+            )}
+          </div>
 
           {result && (
             <details style={{ marginTop: 12 }}>
@@ -655,7 +700,13 @@ export default function Page() {
                     <button
                       style={styles.primaryBtn}
                       onClick={applyCrop}
-                      disabled={reviewBusy || busy || !completedCrop || completedCrop.width < 5 || completedCrop.height < 5}
+                      disabled={
+                        reviewBusy ||
+                        busy ||
+                        !completedCrop ||
+                        completedCrop.width < 5 ||
+                        completedCrop.height < 5
+                      }
                     >
                       Zuschneiden übernehmen
                     </button>
@@ -770,22 +821,13 @@ export default function Page() {
                 )}
 
                 <Field label="Kommentar / Beschreibung (optional)">
-  <textarea
-    style={{
-      ...styles.input,
-      minHeight: 80,
-      resize: "vertical",
-    }}
-    value={reviewForm.comment}
-    onChange={(e) =>
-      setReviewForm((p) => ({
-        ...p,
-        comment: e.target.value,
-      }))
-    }
-    placeholder="z.B. Projekt ABC, Kundentermin, Materialkosten..."
-  />
-</Field>
+                  <textarea
+                    style={{ ...styles.input, minHeight: 80, resize: "vertical" }}
+                    value={reviewForm.comment}
+                    onChange={(e) => setReviewForm((p) => ({ ...p, comment: e.target.value }))}
+                    placeholder="z.B. Projekt ABC, Kundentermin, Materialkosten..."
+                  />
+                </Field>
 
                 <div style={{ marginTop: 6, opacity: 0.8 }}>
                   Confidence: {Math.round((reviewForm.confidence ?? 0) * 100)}%
@@ -810,7 +852,7 @@ export default function Page() {
               <button
                 style={{ ...styles.primaryBtn, opacity: busy ? 0.6 : 1 }}
                 onClick={confirmAndUpload}
-                disabled={busy}
+                disabled={busy || reviewBusy}  // ✅ damit nicht während Extract/Crop “tot” wirkt
               >
                 {busy ? "Upload…" : "Bestätigen & Upload"}
               </button>
