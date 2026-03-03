@@ -39,7 +39,7 @@ async function ensureFolder(drive: any, name: string, parentId?: string) {
 
 function safeForFileName(s: string) {
   return s
-    .replace(/[^\p{L}\p{N}\-_. ]/gu, "") // nur Buchstaben/Zahlen/._- und Leerzeichen
+    .replace(/[^\p{L}\p{N}\-_. ]/gu, "")
     .trim()
     .replace(/\s+/g, "_")
     .slice(0, 40);
@@ -64,40 +64,36 @@ export async function POST(req: Request) {
 
     const bytes = Buffer.from(await file.arrayBuffer());
 
-    // 1) Vision/OCR + Felder extrahieren
     const mimeType =
       file.type ||
       (file.name.toLowerCase().endsWith(".png") ? "image/png" : "image/jpeg");
 
+    // 1) Extract
     const extracted = await extractFromReceiptImage({
       mimeType,
       base64: bytes.toString("base64"),
     });
 
+    // overrides (vom Modal)
     const overridesRaw = form.get("overrides") as string | null;
-let overrides: any = null;
+    let overrides: any = null;
+    if (overridesRaw) {
+      try {
+        overrides = JSON.parse(overridesRaw);
+      } catch {}
+    }
 
-if (overridesRaw) {
-  try {
-    overrides = JSON.parse(overridesRaw);
-  } catch {}
-}
-
-const final = {
-  ...extracted,
-  ...(overrides ?? {}),
-};
-
-// ab jetzt überall `final` verwenden statt `extracted`
+    const final = {
+      ...extracted,
+      ...(overrides ?? {}),
+    };
 
     const category = final.category ?? "SONSTIGES";
 
-    // 2) Bild -> PDF
+    // 2) Image -> PDF
     const pdfDoc = await PDFDocument.create();
     const isPng = mimeType.includes("png");
-    const embedded = isPng
-      ? await pdfDoc.embedPng(bytes)
-      : await pdfDoc.embedJpg(bytes);
+    const embedded = isPng ? await pdfDoc.embedPng(bytes) : await pdfDoc.embedJpg(bytes);
 
     const page = pdfDoc.addPage([embedded.width, embedded.height]);
     page.drawImage(embedded, {
@@ -109,44 +105,41 @@ const final = {
 
     const pdfBytes = await pdfDoc.save();
 
-    // 3) Drive Client (User OAuth)
+    // 3) Drive client
     const auth = new google.auth.OAuth2();
     auth.setCredentials({ access_token: accessToken });
     const drive = google.drive({ version: "v3", auth });
 
-    // 4) Ordnerstruktur
+    // 4) Root: entweder ENV-ID (bestehend), sonst Ordnername "Belege"
+    const rootFolderIdFromEnv = process.env.DRIVE_ROOT_FOLDER_ID?.trim();
     const rootName = process.env.DRIVE_ROOT_FOLDER || "Belege";
 
-// ===== Datum vom Beleg verwenden =====
-const receiptDate =
-  final.date && /^\d{4}-\d{2}-\d{2}$/.test(final.date)
-    ? new Date(final.date)
-    : new Date();
+    const rootId = rootFolderIdFromEnv
+      ? rootFolderIdFromEnv
+      : await ensureFolder(drive, rootName);
 
-const yyyy = String(receiptDate.getFullYear());
-const mm = String(receiptDate.getMonth() + 1).padStart(2, "0");
-const dd = String(receiptDate.getDate()).padStart(2, "0");
+    // Datum vom Beleg verwenden
+    const receiptDate =
+      final.date && /^\d{4}-\d{2}-\d{2}$/.test(final.date)
+        ? new Date(final.date)
+        : new Date();
 
-// ===== Ordnerstruktur =====
-const rootId = await ensureFolder(drive, rootName);
-const yearId = await ensureFolder(drive, yyyy, rootId);
-const monthId = await ensureFolder(drive, mm, yearId);
-const categoryId = await ensureFolder(drive, category, monthId);
+    const yyyy = String(receiptDate.getFullYear());
+    const mm = String(receiptDate.getMonth() + 1).padStart(2, "0");
+    const dd = String(receiptDate.getDate()).padStart(2, "0");
 
-// ===== Dateiname =====
-const dateStr = `${yyyy}-${mm}-${dd}`;
+    // Unterordner: YYYY/MM/Kategorie
+    const yearId = await ensureFolder(drive, yyyy, rootId);
+    const monthId = await ensureFolder(drive, mm, yearId);
+    const categoryId = await ensureFolder(drive, category, monthId);
 
-const vendor = final.vendor
-  ? safeForFileName(final.vendor)
-  : "BELEG";
+    // Dateiname
+    const dateStr = `${yyyy}-${mm}-${dd}`;
+    const vendor = final.vendor ? safeForFileName(final.vendor) : "BELEG";
+    const totalStr = final.total != null ? String(final.total).replace(".", ",") : "NA";
+    const fileName = `${dateStr}_${category}_${vendor}_${totalStr}.pdf`;
 
-const totalStr =
-  final.total != null
-    ? String(final.total).replace(".", ",")
-    : "NA";
-
-const fileName = `${dateStr}_${category}_${vendor}_${totalStr}.pdf`;
-    // 6) Upload als Stream
+    // 5) Upload PDF
     const uploaded = await drive.files.create({
       requestBody: {
         name: fileName,
@@ -160,33 +153,32 @@ const fileName = `${dateStr}_${category}_${vendor}_${totalStr}.pdf`;
       fields: "id, webViewLink",
     });
 
-let excel: any = null;
-try {
-  excel = await appendRowToDriveExcel({
-    drive,
-    rootFolderId: rootId,
-    row: {
-      date: final?.date ?? new Date().toISOString().slice(0, 10), // ✅ nur YYYY-MM-DD
-      vendor: final?.vendor ?? "",
-      total:
-        typeof final?.total === "number"
-          ? final.total
-          : typeof final?.total === "string"
-          ? Number(String(final.total).replace(",", "."))
-          : null,
-      currency: final?.currency ?? "EUR", // ✅ Default
-      category,
-      pdfName: fileName,
-      pdfWebViewLink: uploaded.data.webViewLink ?? null,
-      comment: final?.comment ?? "",
-     // pdfFileId: uploaded.data.id ?? null,
-     // confidence: typeof final?.confidence === "number" ? final.confidence : 0, // ✅ sauber
-    },
-  });
-} catch (e: any) {
-  console.error("EXCEL_ERROR", e);
-  excel = { ok: false, error: e?.message ?? String(e) };
-}
+    // 6) Excel
+    let excel: any = null;
+    try {
+      excel = await appendRowToDriveExcel({
+        drive,
+        rootFolderId: rootId,
+        row: {
+          date: final?.date ?? new Date().toISOString().slice(0, 10),
+          vendor: final?.vendor ?? "",
+          total:
+            typeof final?.total === "number"
+              ? final.total
+              : typeof final?.total === "string"
+              ? Number(String(final.total).replace(",", "."))
+              : null,
+          currency: final?.currency ?? "EUR",
+          category,
+          pdfName: fileName,
+          pdfWebViewLink: uploaded.data.webViewLink ?? null,
+          comment: final?.comment ?? "",
+        },
+      });
+    } catch (e: any) {
+      console.error("EXCEL_ERROR", e);
+      excel = { ok: false, error: e?.message ?? String(e) };
+    }
 
     return NextResponse.json({
       ok: true,
@@ -195,8 +187,9 @@ try {
         webViewLink: uploaded.data.webViewLink,
         fileName,
       },
-      folder: { rootName, yyyy, mm, category },
+      folder: { rootId, rootName, yyyy, mm, category },
       extracted,
+      final,
       excel,
     });
   } catch (e: any) {
