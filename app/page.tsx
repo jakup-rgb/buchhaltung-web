@@ -24,6 +24,7 @@ type ReviewForm = {
   invoiceNumber: string;
   companyType: "INTERN" | "EXTERN";
   internalCompany: "RWD" | "DIEM" | "";
+  storageTarget: "shared" | "private";
   comment: string;
   confidence: number; // 0..1
 };
@@ -140,6 +141,7 @@ export default function Page() {
     invoiceNumber: "",
     companyType: "EXTERN",
     internalCompany: "",
+    storageTarget: "shared",
     comment: "",
     confidence: 0,
   });
@@ -252,6 +254,7 @@ export default function Page() {
       invoiceNumber: "",
       companyType: "EXTERN",
       internalCompany: "",
+      storageTarget: "shared",
       comment: "",
       confidence: 0,
     });
@@ -351,6 +354,7 @@ export default function Page() {
         invoiceNumber: reviewForm.invoiceNumber || null,
         companyType: reviewForm.companyType,
         internalCompany: reviewForm.internalCompany || null,
+        storageTarget: reviewForm.storageTarget,
         comment: reviewForm.comment || null,
         confidence: reviewForm.confidence ?? 0,
       };
@@ -713,6 +717,22 @@ export default function Page() {
                   </div>
                 </div>
               )}
+
+              <Field label="Speicherort">
+  <select
+    style={styles.input}
+    value={reviewForm.storageTarget}
+    onChange={(e) =>
+      setReviewForm((p) => ({
+        ...p,
+        storageTarget: e.target.value as "shared" | "private",
+      }))
+    }
+  >
+    <option value="shared">Freigegebener Ordner</option>
+    <option value="private">Mein Drive</option>
+  </select>
+</Field>
 
               {/* Form */}
               <div style={styles.formGrid}>

@@ -111,12 +111,22 @@ export async function POST(req: Request) {
     const drive = google.drive({ version: "v3", auth });
 
     // 4) Root: entweder ENV-ID (bestehend), sonst Ordnername "Belege"
-    const rootFolderIdFromEnv = process.env.DRIVE_ROOT_FOLDER_ID?.trim();
-    const rootName = process.env.DRIVE_ROOT_FOLDER || "Belege";
+const rootFolderIdFromEnv = process.env.DRIVE_ROOT_FOLDER_ID?.trim();
+const rootName = process.env.DRIVE_ROOT_FOLDER || "Belege";
 
-    const rootId = rootFolderIdFromEnv
-      ? rootFolderIdFromEnv
-      : await ensureFolder(drive, rootName);
+const storageTarget = final.storageTarget === "private" ? "private" : "shared";
+
+let rootId: string;
+
+if (storageTarget === "private") {
+  // Im eigenen Drive des eingeloggten Users
+  rootId = await ensureFolder(drive, rootName);
+} else {
+  // Im freigegebenen Ordner
+  rootId = rootFolderIdFromEnv
+    ? rootFolderIdFromEnv
+    : await ensureFolder(drive, rootName);
+}
 
     // Datum vom Beleg verwenden
     const receiptDate =
@@ -187,7 +197,7 @@ export async function POST(req: Request) {
         webViewLink: uploaded.data.webViewLink,
         fileName,
       },
-      folder: { rootId, rootName, yyyy, mm, category },
+      folder: { rootId, rootName, yyyy, mm, category, storageTarget },
       extracted,
       final,
       excel,
