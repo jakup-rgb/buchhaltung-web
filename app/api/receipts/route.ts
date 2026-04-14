@@ -13,10 +13,12 @@ async function listChildFolders(drive: any, parentId: string) {
   return res.data.files ?? [];
 }
 
-async function listPdfsInFolder(drive: any, folderId: string) {
+async function listPdfsInFolder(drive: any, folderId: string, userEmail: string) {
+  const safeEmail = userEmail.replace(/'/g, "\\'");
+
   const res = await drive.files.list({
-    q: `'${folderId}' in parents and mimeType='application/pdf' and trashed=false`,
-    fields: "files(id,name,webViewLink,createdTime)",
+    q: `'${folderId}' in parents and mimeType='application/pdf' and trashed=false and properties has { key='uploadedBy' and value='${safeEmail}' }`,
+    fields: "files(id,name,webViewLink,createdTime,properties)",
     spaces: "drive",
     orderBy: "createdTime desc",
     pageSize: 200,
@@ -29,8 +31,9 @@ export async function GET() {
     const session = await getServerSession(authOptions);
     // @ts-expect-error
     const accessToken = session?.accessToken;
+    const userEmail = session?.user?.email;
 
-    if (!accessToken) {
+    if (!accessToken || !userEmail) {
       return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
     }
 
@@ -40,14 +43,15 @@ export async function GET() {
 
     const rootFolderIdFromEnv = process.env.DRIVE_ROOT_FOLDER_ID?.trim();
     const rootName = process.env.DRIVE_ROOT_FOLDER || "Belege";
+    const safeEmail = userEmail.replace(/'/g, "\\'");
 
     if (!rootFolderIdFromEnv) {
-      // Fallback: altes Verhalten (nur App-PDFs allgemein)
+      // Fallback: ohne festen Root-Ordner, aber trotzdem nur eigene Uploads
       const res = await drive.files.list({
-        q: `mimeType='application/pdf' and trashed=false`,
+        q: `mimeType='application/pdf' and trashed=false and properties has { key='uploadedBy' and value='${safeEmail}' }`,
         pageSize: 30,
         orderBy: "createdTime desc",
-        fields: "files(id,name,webViewLink,createdTime)",
+        fields: "files(id,name,webViewLink,createdTime,properties)",
         spaces: "drive",
       });
 
@@ -73,7 +77,7 @@ export async function GET() {
       const folders = await listChildFolders(drive, current);
       for (const f of folders) queue.push(f.id!);
 
-      const files = await listPdfsInFolder(drive, current);
+      const files = await listPdfsInFolder(drive, current, userEmail);
       pdfs.push(...files);
     }
 

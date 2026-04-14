@@ -151,11 +151,14 @@ if (storageTarget === "private") {
 
     // 5) Upload PDF
     const uploaded = await drive.files.create({
-      requestBody: {
-        name: fileName,
-        parents: [categoryId],
-        mimeType: "application/pdf",
-      },
+requestBody: {
+  name: fileName,
+  parents: [categoryId],
+  mimeType: "application/pdf",
+  properties: {
+    uploadedBy: session.user?.email || "unknown",
+  },
+},
       media: {
         mimeType: "application/pdf",
         body: Readable.from(Buffer.from(pdfBytes)),
